@@ -13,6 +13,9 @@ import (
 	"net/mail"
 	"strings"
 
+	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/proto"
 	"golang.org/x/net/html/charset"
 )
 
@@ -27,33 +30,72 @@ type ParsedEmailData struct {
 	Attachments     map[string][]byte
 }
 
-// ConvertHTMLToPDF converts HTML string content to PDF bytes using wkhtmltopdf.
-func ConvertHTMLToPDF(htmlContent string) ([]byte, error) {
+// ConvertHTMLToPDF converts HTML string content to PDF bytes using Rod.
+func ConvertHTMLToPDF(htmlContent string) (pdfBytes []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Convert panic to error
+			err = fmt.Errorf("recovered panic during Rod PDF conversion: %v", r)
+			log.Printf("Error: %v", err) // Log the panic as an error
+		}
+	}()
+
 	if htmlContent == "" {
 		return nil, fmt.Errorf("HTML content is empty, cannot convert to PDF")
 	}
 
-	pdfg, err := wkhtmltopdf.NewPdfGenerator()
+	// Attempt to find a locally installed browser executable.
+	// The launcher path can be manually set if needed, e.g., u := launcher.New().Bin("/path/to/chrome").MustLaunch()
+	var browserPath string
+	var err error
+	browserPath, err = launcher.LookPath()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create PDF generator: %w", err)
+		log.Printf("Warning: Could not automatically find browser for Rod: %v. You might need to set CHROME_PATH or ensure Chrome/Chromium is in PATH.", err)
+		// Fallback or specific path if auto-detection fails and you know where it is
+		// For CI environments, this might be a fixed path.
+		// browserPath = "/usr/bin/google-chrome" // Example if you know it's there
+		// For now, let launcher try its defaults if LookPath fails.
 	}
 
-	// Add a page from a string.
-	pdfg.AddPage(wkhtmltopdf.NewPageReader(strings.NewReader(htmlContent)))
+	l := launcher.New()
+	if browserPath != "" {
+		l = l.Bin(browserPath)
+	}
+	// Add --no-sandbox for running in Docker/CI environments if necessary
+	// l.Set("no-sandbox")
 
-	// Create PDF document in internal buffer
-	err = pdfg.Create()
+	controlURL, err := l.Launch()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create PDF: %w", err)
+		return nil, fmt.Errorf("failed to launch browser for Rod: %w", err)
 	}
 
-	pdfBytes, err := pdfg.Bytes()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get PDF bytes: %w", err)
-	}
+	browser := rod.New().ControlURL(controlURL).MustConnect()
+	defer browser.MustClose()
+	log.Println("Rod browser instance launched.")
 
-	log.Printf("Successfully converted HTML to PDF (size: %d bytes)", len(pdfBytes))
-	return pdfBytes, nil
+	page, err := browser.Page(proto.TargetCreateTarget{URL: ""}) // Create a new blank page
+	if err != nil {
+		return nil, fmt.Errorf("failed to create page with Rod: %w", err)
+	}
+	defer page.MustClose()
+	log.Println("Rod page created.")
+
+	// Set content
+	// Using MustSetDocumentContent is generally preferred for setting HTML.
+	page.MustSetDocumentContent(htmlContent) // This can panic
+	log.Println("HTML content set on Rod page.")
+
+	// Generate PDF
+	// Default PDF options are usually fine. Customize with proto.PagePrintToPDF{} if needed.
+	pdfBytes, err = page.PDF(&proto.PagePrintToPDF{ // Assign to named return parameter
+		PrintBackground: true, // Example: ensure background graphics are printed
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate PDF with Rod: %w", err) // err will be shadowed if not careful, but here it's fine.
+	}
+	log.Printf("Successfully converted HTML to PDF using Rod (size: %d bytes)", len(pdfBytes))
+
+	return pdfBytes, nil // pdfBytes is already assigned, err is nil if we reach here
 }
 
 // decodePartBody decodes the body of a multipart.Part based on its Content-Transfer-Encoding.
@@ -286,14 +328,14 @@ func ParseEmail(msg *mail.Message) (*ParsedEmailData, error) {
 
 	// Attempt to convert HTML to PDF if HTML body is present
 	if data.IsHTML && data.HTMLBody != "" {
-		log.Println("HTML body is present, attempting to convert to PDF...")
+		log.Println("HTML body is present, attempting to convert to PDF using Rod...")
 		pdfBytes, pdfErr := ConvertHTMLToPDF(data.HTMLBody)
 		if pdfErr != nil {
-			log.Printf("Warning: Failed to convert HTML to PDF: %v", pdfErr)
-			// Do not stop processing, PDF is optional
+			log.Printf("Warning: Failed to convert HTML to PDF using Rod: %v", pdfErr)
+			// PDF is optional, so we don't stop processing if conversion fails.
 		} else {
 			data.PDFBody = pdfBytes
-			log.Printf("Successfully converted HTML to PDF, stored %d bytes.", len(data.PDFBody))
+			log.Printf("Successfully converted HTML to PDF using Rod, stored %d bytes.", len(data.PDFBody))
 		}
 	}
 
