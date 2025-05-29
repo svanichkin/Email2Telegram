@@ -75,7 +75,7 @@ func (tb *TelegramBot) RequestPassword(prompt string) (string, error) {
 // SendEmailData sends the parsed email data to the configured user.
 func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	if tb.api == nil {
-		return errors.New("Telegram API is not initialized")
+		return errors.New("telegram API is not initialized")
 	}
 	if data == nil {
 		return errors.New("parsed email data is nil")
@@ -84,38 +84,45 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	var cumulativeError error
 
 	// 1. Main Message (Subject + Text Body)
-	mainMessageText := fmt.Sprintf("Subject: %s\n\n", data.Subject)
-	if data.TextBody != "" {
-		// Truncate if too long for a single message (Telegram has limits)
-		const maxLen = 3800 // Telegram message limit is 4096, leave some room for subject and formatting
-		if len(data.TextBody) > maxLen {
-			mainMessageText += data.TextBody[:maxLen] + "\n\n[Message truncated]"
-		} else {
-			mainMessageText += data.TextBody
+	const maxLen = 3800 // безопасный лимит
+	var messages []string
+	if !data.HasHTML && data.TextBody != "" {
+		text := fmt.Sprintf("*From:* %s\n*To:* %s\n\n*%s*\n\n%s", data.From, data.To, data.Subject, data.TextBody)
+		for len(text) > 0 {
+			if len(text) > maxLen {
+				messages = append(messages, text[:maxLen])
+				text = text[maxLen:]
+			} else {
+				messages = append(messages, text)
+				break
+			}
 		}
-	} else if data.HTMLBody != "" && data.PDFBody == nil { // If no text body but HTML, and PDF failed or wasn't generated
-		mainMessageText += "[HTML content was present, but no text version. PDF might be attached if conversion was successful.]"
-	} else if data.TextBody == "" {
-		mainMessageText += "[No text body found]"
-	}
 
-	msg := tgbotapi.NewMessage(tb.allowedUserID, mainMessageText)
-	log.Printf("Attempting to send main email message (Subject: %s) to chat ID %d", data.Subject, tb.allowedUserID)
-	if _, err := tb.api.Send(msg); err != nil {
-		log.Printf("Error sending main message: %v", err)
-		if cumulativeError == nil {
-			cumulativeError = fmt.Errorf("failed to send main message: %w", err)
-		} else {
-			cumulativeError = fmt.Errorf("%v; failed to send main message: %w", cumulativeError, err)
+		log.Printf("Attempting to send main email message (Subject: %s) to chat ID %d", data.Subject, tb.allowedUserID)
+		for i := range len(messages) {
+			msg := tgbotapi.NewMessage(tb.allowedUserID, messages[i])
+			msg.ParseMode = "Markdown"
+			if _, err := tb.api.Send(msg); err != nil {
+				log.Printf("Error sending main message: %v", err)
+				if cumulativeError == nil {
+					cumulativeError = fmt.Errorf("failed to send main message: %w", err)
+				} else {
+					cumulativeError = fmt.Errorf("%v; failed to send main message: %w", cumulativeError, err)
+				}
+			}
 		}
 	}
 
 	// 2. PDF Attachment
-	if data.PDFBody != nil && len(data.PDFBody) > 0 {
-		pdfFile := tgbotapi.FileBytes{Name: "email.pdf", Bytes: data.PDFBody}
+	if data.PDFBody != nil {
+		pdfFile := tgbotapi.FileBytes{Name: data.PDFName, Bytes: data.PDFBody}
 		docMsg := tgbotapi.NewDocument(tb.allowedUserID, pdfFile)
-		docMsg.Caption = "Email content as PDF"
-		log.Printf("Attempting to send PDF attachment (email.pdf, size: %d bytes) to chat ID %d", len(data.PDFBody), tb.allowedUserID)
+		docMsg.Caption = fmt.Sprintf("From: %s\nTo: %s\n\n%s", data.From, data.To, data.Subject)
+		docMsg.Thumb = tgbotapi.FileBytes{
+			Name:  data.PDFName,
+			Bytes: data.PDFPreview,
+		}
+		log.Printf("Attempting to send PDF attachment (%s, size: %d bytes) to chat ID %d", data.PDFName, len(data.PDFBody), tb.allowedUserID)
 		if _, err := tb.api.Send(docMsg); err != nil {
 			log.Printf("Error sending PDF attachment: %v", err)
 			if cumulativeError == nil {
@@ -150,8 +157,10 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 
 	// 4. Unsubscribe Link
 	if data.UnsubscribeLink != "" {
-		unsubscribeMessageText := fmt.Sprintf("Unsubscribe link: %s", data.UnsubscribeLink)
+		unsubscribeMessageText := fmt.Sprintf("[Unsubscribe](%s)", data.UnsubscribeLink)
 		unsMsg := tgbotapi.NewMessage(tb.allowedUserID, unsubscribeMessageText)
+		unsMsg.DisableWebPagePreview = true
+		unsMsg.ParseMode = "Markdown"
 		log.Printf("Attempting to send unsubscribe link to chat ID %d: %s", tb.allowedUserID, data.UnsubscribeLink)
 		if _, err := tb.api.Send(unsMsg); err != nil {
 			log.Printf("Error sending unsubscribe link: %v", err)

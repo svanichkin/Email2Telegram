@@ -7,6 +7,11 @@
 *.dll
 *.so
 *.dylib
+*.rsls
+*.pdf
+*.eml
+config.ini
+processed_uids.txt
 
 # Test binary, built with `go test -c`
 *.test
