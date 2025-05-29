@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -145,64 +146,57 @@ func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
 }
 
 // FetchMail fetches the content of a specific email by UID.
-func (ec *EmailClient) FetchMail(uid uint32) (*mail.Message, error) {
+func (ec *EmailClient) FetchMail(uid uint32) (*mail.Message, []byte, error) {
 	if ec.client == nil {
-		return nil, fmt.Errorf("IMAP client is not connected")
+		return nil, nil, fmt.Errorf("IMAP client is not connected")
 	}
 
-	// It's good practice to ensure INBOX is selected, though ListNewMailUIDs might have already done it.
-	// If another part of the code could change the selected mailbox, this is important.
-	// For this specific flow, it might be redundant but adds robustness.
 	if ec.client.Mailbox() == nil || ec.client.Mailbox().Name != "INBOX" {
 		log.Println("Selecting INBOX for FetchMail...")
 		_, err := ec.client.Select("INBOX", false)
 		if err != nil {
-			return nil, fmt.Errorf("failed to select INBOX for fetch: %w", err)
+			return nil, nil, fmt.Errorf("failed to select INBOX for fetch: %w", err)
 		}
 	}
 
 	seqset := new(imap.SeqSet)
 	seqset.AddNum(uid)
 
+	section := &imap.BodySectionName{}
 	items := []imap.FetchItem{
 		imap.FetchEnvelope,
 		imap.FetchFlags,
 		imap.FetchUid,
 		imap.FetchRFC822Size,
-		// To fetch the full body, use BodySectionName without Peek.
-		// Using "" or "BODY[]" as the section name with FetchBody is also common.
-		// Here we specify the section explicitly.
-		(&imap.BodySectionName{}).FetchItem(),
+		section.FetchItem(),
 	}
 
 	messages := make(chan *imap.Message, 1)
 	if err := ec.client.UidFetch(seqset, items, messages); err != nil {
-		return nil, fmt.Errorf("failed to fetch email with UID %d: %w", uid, err)
+		return nil, nil, fmt.Errorf("failed to fetch email with UID %d: %w", uid, err)
 	}
 
 	msg := <-messages
 	if msg == nil {
-		return nil, fmt.Errorf("no message found for UID %d (channel returned nil)", uid)
+		return nil, nil, fmt.Errorf("no message found for UID %d", uid)
 	}
 
-	// The body is in msg.GetBody(section)
-	var bodyReader io.Reader
-	for _, literal := range msg.Body {
-		bodyReader = literal
-		break // Assuming only one BODY[] part for simplicity
-	}
-
+	bodyReader := msg.GetBody(section)
 	if bodyReader == nil {
-		return nil, fmt.Errorf("could not find body for message UID %d", uid)
+		return nil, nil, fmt.Errorf("could not find body for message UID %d", uid)
 	}
 
-	parsedMail, err := mail.ReadMessage(bodyReader)
+	// TeeReader сохраняет копию в буфер
+	var buf bytes.Buffer
+	tee := io.TeeReader(bodyReader, &buf)
+
+	parsedMail, err := mail.ReadMessage(tee)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse email content for UID %d: %w", uid, err)
+		return nil, nil, fmt.Errorf("failed to parse email content for UID %d: %w", uid, err)
 	}
-	log.Printf("Successfully fetched and parsed email with UID %d, Subject: %s", uid, parsedMail.Header.Get("Subject"))
 
-	return parsedMail, nil
+	log.Printf("Successfully fetched and parsed email with UID %d, Subject: %s", uid, parsedMail.Header.Get("Subject"))
+	return parsedMail, buf.Bytes(), nil
 }
 
 // MarkUIDAsProcessed adds the UID to the in-memory map and saves it to the file.

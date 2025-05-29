@@ -2,16 +2,199 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/proto"
+	"github.com/jhillyerd/enmime"
+)
+
+// ParsedEmailData holds extracted information from an email
+type ParsedEmailData struct {
+	Subject         string
+	UnsubscribeLink string
+	TextBody        string // Только plain text
+	HTMLBody        string // Только HTML
+	HasText         bool   // Явное указание наличия текста
+	HasHTML         bool   // Явное указание наличия HTML
+	PDFBody         []byte
+	PDFName         string
+	Attachments     map[string][]byte
+}
+
+func ParseEmail(raw []byte) (*ParsedEmailData, error) {
+	env, err := enmime.ReadEnvelope(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+
+	data := &ParsedEmailData{
+		Subject:         env.GetHeader("Subject"),
+		UnsubscribeLink: extractUnsubscribeLink(env.GetHeader("List-Unsubscribe")),
+		TextBody:        env.Text,
+		HTMLBody:        env.HTML,
+		HasText:         env.Text != "",
+		HasHTML:         env.HTML != "",
+		Attachments:     make(map[string][]byte),
+	}
+
+	// Обработка вложений
+	for _, att := range env.Attachments {
+		data.Attachments[att.FileName] = att.Content
+	}
+
+	// Генерация PDF
+	if data.HasHTML {
+		if pdf, err := ConvertHTMLToPDF(data.HTMLBody); err == nil {
+			data.PDFName = SanitizeFileName(data.Subject) + ".pdf"
+			data.PDFBody = pdf
+		}
+	}
+
+	return data, nil
+}
+
+func SanitizeFileName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		// Запрещённые символы в Windows для имён файлов:
+		// \ / : * ? " < > | и управляющие символы (r < 32)
+		if r < 32 {
+			continue
+		}
+		switch r {
+		case '\\', '/', ':', '*', '?', '"', '<', '>', '|':
+			continue
+		}
+
+		// Разрешаем буквы (любой язык), цифры, пробел, тире, подчёркивание, точку
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+			continue
+		}
+
+		// Простая проверка для эмодзи (часть диапазонов)
+		if (r >= 0x1F300 && r <= 0x1FAFF) || (r >= 0x2600 && r <= 0x26FF) {
+			b.WriteRune(r)
+			continue
+		}
+
+		// Все остальные символы пропускаем
+	}
+
+	// Удаляем пробелы в начале и конце
+	return strings.TrimSpace(b.String())
+}
+
+func ConvertHTMLToPDF(htmlContent string) ([]byte, error) {
+	if htmlContent == "" {
+		return nil, fmt.Errorf("HTML content is empty")
+	}
+
+	// Автоматический запуск браузера
+	l := launcher.New().
+		Headless(true).
+		NoSandbox(true)
+
+	url, err := l.Launch()
+	if err != nil {
+		return nil, fmt.Errorf("failed to launch browser: %w", err)
+	}
+
+	browser := rod.New().ControlURL(url).MustConnect()
+	defer browser.MustClose()
+
+	page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create page: %w", err)
+	}
+	defer page.MustClose()
+
+	// Устанавливаем контент страницы
+	if err := page.SetDocumentContent(htmlContent); err != nil {
+		return nil, fmt.Errorf("failed to set content: %w", err)
+	}
+
+	// 1. Ожидаем полной загрузки страницы
+	page.WaitLoad()
+
+	// 2. Явно ждем загрузки всех изображений
+	page.Eval(`() => {
+        return Promise.all(
+            Array.from(document.images).map(img => {
+                if (img.complete) return Promise.resolve();
+                return new Promise((resolve) => {
+                    img.addEventListener('load', resolve);
+                    img.addEventListener('error', resolve);
+                });
+            })
+        );
+    }`)
+
+	// 3. Добавляем дополнительную задержку для надежности
+	time.Sleep(2 * time.Second)
+
+	// Параметры PDF
+	scale := 1.0
+	paperWidth := 8.27
+	paperHeight := 11.69
+
+	pdfOpts := &proto.PagePrintToPDF{
+		PrintBackground:   true,
+		Scale:             &scale,
+		PreferCSSPageSize: true,
+		PaperWidth:        &paperWidth,
+		PaperHeight:       &paperHeight,
+	}
+
+	// Генерация PDF
+	pdfStream, err := page.PDF(pdfOpts)
+	if err != nil {
+		return nil, fmt.Errorf("PDF generation failed: %w", err)
+	}
+
+	// Чтение потока в байты
+	pdfBytes, err := io.ReadAll(pdfStream)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PDF stream: %w", err)
+	}
+
+	return pdfBytes, nil
+}
+
+// Helper: Extract unsubscribe link
+func extractUnsubscribeLink(header string) string {
+	parts := strings.Split(header, ",")
+	for _, part := range parts {
+		clean := strings.TrimSpace(part)
+		if strings.HasPrefix(clean, "<") && strings.HasSuffix(clean, ">") {
+			url := clean[1 : len(clean)-1]
+			if strings.HasPrefix(url, "http") {
+				return url
+			}
+		}
+	}
+	return ""
+}
+
+/*import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
@@ -23,321 +206,448 @@ import (
 type ParsedEmailData struct {
 	Subject         string
 	UnsubscribeLink string
-	TextBody        string
-	HTMLBody        string
-	IsHTML          bool
-	PDFBody         []byte // Will store the PDF version of HTMLBody
+	TextBody        string // Только plain text
+	HTMLBody        string // Только HTML
+	HasText         bool   // Явное указание наличия текста
+	HasHTML         bool   // Явное указание наличия HTML
+	PDFBody         []byte
 	Attachments     map[string][]byte
 }
 
-// ConvertHTMLToPDF converts HTML string content to PDF bytes using Rod.
-func ConvertHTMLToPDF(htmlContent string) (pdfBytes []byte, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Convert panic to error
-			err = fmt.Errorf("recovered panic during Rod PDF conversion: %v", r)
-			log.Printf("Error: %v", err) // Log the panic as an error
-		}
-	}()
+// decodeMessageBody decodes the entire message body based on Content-Transfer-Encoding
+func decodeMessageBody(header mail.Header, body io.Reader) (io.Reader, error) {
+	encoding := header.Get("Content-Transfer-Encoding")
+	log.Printf("Top-level Content-Transfer-Encoding: %s", encoding)
 
-	if htmlContent == "" {
-		return nil, fmt.Errorf("HTML content is empty, cannot convert to PDF")
+	switch strings.ToLower(encoding) {
+	case "base64":
+		return base64.NewDecoder(base64.StdEncoding, body), nil
+	case "quoted-printable":
+		return quotedprintable.NewReader(body), nil
+	case "7bit", "8bit", "binary", "":
+		return body, nil
+	default:
+		return nil, fmt.Errorf("unsupported Content-Transfer-Encoding: %s", encoding)
 	}
-
-	// Attempt to find a locally installed browser executable.
-	// The launcher path can be manually set if needed, e.g., u := launcher.New().Bin("/path/to/chrome").MustLaunch()
-	var browserPath string
-	var err error
-	browserPath, err = launcher.LookPath()
-	if err != nil {
-		log.Printf("Warning: Could not automatically find browser for Rod: %v. You might need to set CHROME_PATH or ensure Chrome/Chromium is in PATH.", err)
-		// Fallback or specific path if auto-detection fails and you know where it is
-		// For CI environments, this might be a fixed path.
-		// browserPath = "/usr/bin/google-chrome" // Example if you know it's there
-		// For now, let launcher try its defaults if LookPath fails.
-	}
-
-	l := launcher.New()
-	if browserPath != "" {
-		l = l.Bin(browserPath)
-	}
-	// Add --no-sandbox for running in Docker/CI environments if necessary
-	// l.Set("no-sandbox")
-
-	controlURL, err := l.Launch()
-	if err != nil {
-		return nil, fmt.Errorf("failed to launch browser for Rod: %w", err)
-	}
-
-	browser := rod.New().ControlURL(controlURL).MustConnect()
-	defer browser.MustClose()
-	log.Println("Rod browser instance launched.")
-
-	page, err := browser.Page(proto.TargetCreateTarget{URL: ""}) // Create a new blank page
-	if err != nil {
-		return nil, fmt.Errorf("failed to create page with Rod: %w", err)
-	}
-	defer page.MustClose()
-	log.Println("Rod page created.")
-
-	// Set content
-	// Using MustSetDocumentContent is generally preferred for setting HTML.
-	page.MustSetDocumentContent(htmlContent) // This can panic
-	log.Println("HTML content set on Rod page.")
-
-	// Generate PDF
-	// Default PDF options are usually fine. Customize with proto.PagePrintToPDF{} if needed.
-	pdfBytes, err = page.PDF(&proto.PagePrintToPDF{ // Assign to named return parameter
-		PrintBackground: true, // Example: ensure background graphics are printed
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate PDF with Rod: %w", err) // err will be shadowed if not careful, but here it's fine.
-	}
-	log.Printf("Successfully converted HTML to PDF using Rod (size: %d bytes)", len(pdfBytes))
-
-	return pdfBytes, nil // pdfBytes is already assigned, err is nil if we reach here
 }
 
-// decodePartBody decodes the body of a multipart.Part based on its Content-Transfer-Encoding.
+// Вспомогательная функция для создания указателей на float64
+func float64Ptr(f float64) *float64 {
+	return &f
+}
+
+func ConvertHTMLToPDF(htmlContent string) ([]byte, error) {
+	if htmlContent == "" {
+		return nil, fmt.Errorf("HTML content is empty")
+	}
+
+	// Автоматический запуск браузера
+	l := launcher.New().
+		Headless(true).
+		NoSandbox(true)
+
+	url, err := l.Launch()
+	if err != nil {
+		return nil, fmt.Errorf("failed to launch browser: %w", err)
+	}
+
+	browser := rod.New().ControlURL(url).MustConnect()
+	defer browser.MustClose()
+
+	page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create page: %w", err)
+	}
+	defer page.MustClose()
+
+	// Устанавливаем контент страницы
+	if err := page.SetDocumentContent(htmlContent); err != nil {
+		return nil, fmt.Errorf("failed to set content: %w", err)
+	}
+
+	// 1. Ожидаем полной загрузки страницы
+	page.WaitLoad()
+
+	// 2. Явно ждем загрузки всех изображений
+	page.Eval(`() => {
+        return Promise.all(
+            Array.from(document.images).map(img => {
+                if (img.complete) return Promise.resolve();
+                return new Promise((resolve) => {
+                    img.addEventListener('load', resolve);
+                    img.addEventListener('error', resolve);
+                });
+            })
+        );
+    }`)
+
+	// 3. Добавляем дополнительную задержку для надежности
+	time.Sleep(2 * time.Second)
+
+	// Параметры PDF
+	scale := 1.0
+	paperWidth := 8.27
+	paperHeight := 11.69
+
+	pdfOpts := &proto.PagePrintToPDF{
+		PrintBackground:   true,
+		Scale:             &scale,
+		PreferCSSPageSize: true,
+		PaperWidth:        &paperWidth,
+		PaperHeight:       &paperHeight,
+	}
+
+	// Генерация PDF
+	pdfStream, err := page.PDF(pdfOpts)
+	if err != nil {
+		return nil, fmt.Errorf("PDF generation failed: %w", err)
+	}
+
+	// Чтение потока в байты
+	pdfBytes, err := io.ReadAll(pdfStream)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PDF stream: %w", err)
+	}
+
+	return pdfBytes, nil
+}
+
+// decodePartBody decodes multipart part body
 func decodePartBody(part *multipart.Part) ([]byte, error) {
-	encoding := part.Header.Get("Content-Transfer-Encoding")
-	log.Printf("Decoding part with Content-Transfer-Encoding: %s", encoding)
+	encoding := strings.ToLower(part.Header.Get("Content-Transfer-Encoding"))
+	log.Printf("Decoding part with encoding: %s", encoding)
 
 	var reader io.Reader = part
-	switch strings.ToLower(encoding) {
+	switch encoding {
 	case "base64":
 		reader = base64.NewDecoder(base64.StdEncoding, part)
 	case "quoted-printable":
 		reader = quotedprintable.NewReader(part)
 	case "7bit", "8bit", "binary":
-		// No decoding needed, but we read it the same way
-		break
 	default:
-		log.Printf("Warning: Unhandled Content-Transfer-Encoding '%s', reading as is.", encoding)
+		log.Printf("Unhandled encoding '%s', reading raw", encoding)
 	}
 
-	body, err := ioutil.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read part body: %w", err)
-	}
-	return body, nil
+	return io.ReadAll(reader)
 }
 
-// decodeText attempts to decode the given bytes using the provided charset.
-// If charset is empty or decoding fails, it returns the original bytes and any error.
+// decodeText handles charset conversion
 func decodeText(bodyBytes []byte, contentTypeHeader string) (string, error) {
 	if len(bodyBytes) == 0 {
 		return "", nil
 	}
 
-	var bodyCharset string
+	charsetName := "utf-8"
 	if contentTypeHeader != "" {
 		_, params, err := mime.ParseMediaType(contentTypeHeader)
 		if err == nil && params["charset"] != "" {
-			bodyCharset = params["charset"]
+			charsetName = params["charset"]
 		}
 	}
 
-	if bodyCharset != "" {
-		log.Printf("Attempting to decode text part with charset: %s", bodyCharset)
-		encoding, _ := charset.Lookup(bodyCharset)
-		if encoding != nil {
-			utf8Reader, err := encoding.NewDecoder().Bytes(bodyBytes)
-			if err == nil {
-				return string(utf8Reader), nil
-			}
-			log.Printf("Failed to decode with charset %s: %v. Falling back to UTF-8 or raw.", bodyCharset, err)
-		} else {
-			log.Printf("Charset %s not found. Falling back to UTF-8 or raw.", bodyCharset)
+	log.Printf("Decoding text with charset: %s", charsetName)
+	encoding, _ := charset.Lookup(charsetName)
+	if encoding != nil {
+		decoded, err := encoding.NewDecoder().Bytes(bodyBytes)
+		if err == nil {
+			return string(decoded), nil
 		}
+		log.Printf("Charset decode error: %v", err)
 	}
 
-	// Fallback: try to interpret as UTF-8, if not, return as is with a warning
-	if strings.ValidUTF8(string(bodyBytes)) {
+	// Fallback to UTF-8
+	if utf8.Valid(bodyBytes) {
 		return string(bodyBytes), nil
 	}
-	
-	// If not valid UTF-8, it might be an error or a different encoding not specified.
-	// For robustness, we might return the string as is with a note, or an error.
-	log.Printf("Warning: Text part is not valid UTF-8 and charset decoding failed or was not possible.")
-	// Return the string as is, but signal there might have been an issue.
-	return string(bodyBytes), fmt.Errorf("text part is not valid UTF-8 and specified charset '%s' could not be used for decoding, or was not specified", bodyCharset)
+
+	log.Printf("Invalid UTF-8 data, returning raw bytes")
+	return string(bodyBytes), fmt.Errorf("charset decoding failed")
 }
 
+// ParseEmail processes email messages
+// func ParseEmail(msg *mail.Message) (*ParsedEmailData, error) {
+// 	data := &ParsedEmailData{
+// 		Attachments: make(map[string][]byte),
+// 	}
 
-// ParseEmail extracts relevant information from a *mail.Message
+// 	// 1. Decode top-level transfer encoding
+// 	decodedBody, err := decodeMessageBody(msg.Header, msg.Body)
+// 	if err != nil {
+// 		log.Printf("Body decode error: %v", err)
+// 		decodedBody = msg.Body // Attempt to use raw body
+// 	}
+
+// 	// 2. Process headers
+// 	data.Subject = msg.Header.Get("Subject")
+
+// 	// Unsubscribe link processing
+// 	if link := extractUnsubscribeLink(msg.Header.Get("List-Unsubscribe")); link != "" {
+// 		data.UnsubscribeLink = link
+// 	}
+
+// 	// 3. Content processing
+// 	contentType := msg.Header.Get("Content-Type")
+// 	mediaType, params, _ := mime.ParseMediaType(contentType)
+
+// 	if strings.HasPrefix(mediaType, "multipart/") {
+// 		mr := multipart.NewReader(decodedBody, params["boundary"])
+// 		for {
+// 			part, err := mr.NextPart()
+// 			if err == io.EOF {
+// 				break
+// 			}
+// 			if err != nil {
+// 				log.Printf("Part read error: %v", err)
+// 				continue
+// 			}
+
+// 			// Process part
+// 			err = processEmailPart(part, data)
+// 			part.Close() // Immediate close after processing
+
+// 			if err != nil {
+// 				log.Printf("Part processing error: %v", err)
+// 			}
+// 		}
+// 	} else {
+// 		// Single part message
+// 		bodyBytes, err := io.ReadAll(decodedBody)
+// 		if err != nil {
+// 			log.Printf("Body read error: %v", err)
+// 		} else {
+// 			processSinglePart(mediaType, bodyBytes, contentType, data)
+// 		}
+// 	}
+
+// 	// 4. Generate PDF if HTML available
+// 	if data.HTMLBody != "" {
+// 		pdfBytes, err := ConvertHTMLToPDF(data.HTMLBody)
+// 		if err != nil {
+// 			log.Printf("PDF conversion failed: %v", err)
+// 		} else {
+// 			data.PDFBody = pdfBytes
+// 		}
+// 	}
+
+// 	return data, nil
+// }
+
 func ParseEmail(msg *mail.Message) (*ParsedEmailData, error) {
 	data := &ParsedEmailData{
 		Attachments: make(map[string][]byte),
+		HasText:     false,
+		HasHTML:     false,
 	}
 
-	// 1. Subject
+	// 1. Обрабатываем заголовки
 	data.Subject = msg.Header.Get("Subject")
+	data.UnsubscribeLink = extractUnsubscribeLink(msg.Header.Get("List-Unsubscribe"))
 
-	// 2. Unsubscribe Link
-	unsubscribeHeader := msg.Header.Get("List-Unsubscribe")
-	if unsubscribeHeader != "" {
-		// The header can contain multiple URLs, often enclosed in < >.
-		// Example: <mailto:unsubscribe@example.com>, <http://www.example.com/unsubscribe>
-		parts := strings.Split(unsubscribeHeader, ",")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if strings.HasPrefix(part, "<") && strings.HasSuffix(part, ">") {
-				url := part[1 : len(part)-1]
-				// Basic validation: should probably involve net/url.Parse
-				if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "mailto:") {
-					data.UnsubscribeLink = url
-					break
-				}
-			}
-		}
-		log.Printf("Found List-Unsubscribe header: '%s', extracted link: '%s'", unsubscribeHeader, data.UnsubscribeLink)
-	}
-
-	// 3. Content Type and Body
-	contentTypeHeader := msg.Header.Get("Content-Type")
-	mediaType, params, err := mime.ParseMediaType(contentTypeHeader)
+	// 2. Определяем Content-Type
+	contentType := msg.Header.Get("Content-Type")
+	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		log.Printf("Warning: Could not parse Content-Type header '%s': %v. Attempting to read body directly.", contentTypeHeader, err)
-		// Try to read the body directly as plain text if content type parsing fails
-		bodyBytes, readErr := ioutil.ReadAll(msg.Body)
-		if readErr == nil {
-			data.TextBody, _ = decodeText(bodyBytes, contentTypeHeader) // Attempt to decode with charset if available
-		} else {
-			log.Printf("Error reading message body when Content-Type parsing failed: %v", readErr)
-		}
-		return data, nil // Return what we have, or an error if critical parsing failed
+		log.Printf("Warning: invalid Content-Type header: %v", err)
+		mediaType = "text/plain" // Фолбэк
 	}
 
-	log.Printf("Parsing email with Content-Type: %s, Media Type: %s", contentTypeHeader, mediaType)
-
+	// 3. Обрабатываем тело письма
 	if strings.HasPrefix(mediaType, "multipart/") {
-		mr := multipart.NewReader(msg.Body, params["boundary"])
-		for {
-			part, err := mr.NextPart()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				log.Printf("Error reading multipart part: %v", err)
-				continue // Skip this part
-			}
-			defer part.Close()
-
-			partContentType := part.Header.Get("Content-Type")
-			partMediaType, partParams, err := mime.ParseMediaType(partContentType)
-			if err != nil {
-				log.Printf("Error parsing part Content-Type '%s': %v", partContentType, err)
-				continue
-			}
-			log.Printf("Processing part with Content-Type: %s, Media Type: %s", partContentType, partMediaType)
-
-
-			// Check Content-Disposition
-			disposition, dispParams, dispErr := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
-			isAttachment := false
-			filename := ""
-			if dispErr == nil && (disposition == "attachment" || disposition == "inline") {
-				isAttachment = true
-				filename = dispParams["filename"]
-				if filename == "" && disposition == "inline" && partParams["name"] != "" {
-					 filename = partParams["name"] // some emails use name in content-type for inline images
-				}
-				if filename == "" { // fallback if filename is empty
-					filename = fmt.Sprintf("attachment_%d", len(data.Attachments)+1)
-				}
-			}
-
-
-			if isAttachment {
-				log.Printf("Part identified as attachment. Disposition: %s, Filename: %s", disposition, filename)
-				attachmentBytes, decodeErr := decodePartBody(part)
-				if decodeErr != nil {
-					log.Printf("Error decoding attachment '%s': %v", filename, decodeErr)
-					continue
-				}
-				data.Attachments[filename] = attachmentBytes
-				log.Printf("Successfully decoded and stored attachment: %s (size: %d bytes)", filename, len(attachmentBytes))
-			} else {
-				// Not an attachment, so it's likely a body part (text, html, etc.)
-				bodyBytes, decodeErr := decodePartBody(part)
-				if decodeErr != nil {
-					log.Printf("Error decoding body part: %v", decodeErr)
-					continue
-				}
-
-				switch partMediaType {
-				case "text/plain":
-					data.TextBody, err = decodeText(bodyBytes, partContentType)
-					if err != nil {
-						log.Printf("Error decoding text/plain part: %v", err)
-					} else {
-						log.Printf("Stored text/plain part (decoded size: %d)", len(data.TextBody))
-					}
-				case "text/html":
-					data.HTMLBody, err = decodeText(bodyBytes, partContentType)
-					if err != nil {
-						log.Printf("Error decoding text/html part: %v", err)
-					} else {
-						log.Printf("Stored text/html part (decoded size: %d)", len(data.HTMLBody))
-					}
-					data.IsHTML = true
-				default:
-					log.Printf("Skipping multipart part with unhandled media type: %s", partMediaType)
-				}
-			}
-		}
+		err = parseMultipartMessage(msg, data, params["boundary"])
 	} else {
-		// Single part message
-		log.Printf("Message is single part. Media Type: %s", mediaType)
-		// For single part, mail.Message.Body is already decoded for Content-Transfer-Encoding.
-		// We just need to handle charset.
-		bodyBytes, readErr := ioutil.ReadAll(msg.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("failed to read single part message body: %w", readErr)
-		}
-
-		decodedBody, decodeErr := decodeText(bodyBytes, contentTypeHeader)
-		if decodeErr != nil {
-			log.Printf("Error decoding single part body with charset: %v. Storing raw bytes as string.", decodeErr)
-			// Fallback to raw string if charset decoding fails
-			if mediaType == "text/plain" {
-				data.TextBody = string(bodyBytes)
-			} else if mediaType == "text/html" {
-				data.HTMLBody = string(bodyBytes)
-				data.IsHTML = true
-			}
-		} else {
-			if mediaType == "text/plain" {
-				data.TextBody = decodedBody
-				log.Printf("Stored single part text/plain (decoded size: %d)", len(data.TextBody))
-			} else if mediaType == "text/html" {
-				data.HTMLBody = decodedBody
-				data.IsHTML = true
-				log.Printf("Stored single part text/html (decoded size: %d)", len(data.HTMLBody))
-			} else {
-				log.Printf("Single part message with unhandled media type: %s. Body stored as potential attachment.", mediaType)
-				filename := "attachment_0"
-				if params["name"] != "" {
-					filename = params["name"]
-				}
-				data.Attachments[filename] = bodyBytes // Store raw bytes for non-text attachments
-			}
-		}
+		err = parseSinglePartMessage(msg, data, mediaType)
 	}
 
-	// Attempt to convert HTML to PDF if HTML body is present
-	if data.IsHTML && data.HTMLBody != "" {
-		log.Println("HTML body is present, attempting to convert to PDF using Rod...")
-		pdfBytes, pdfErr := ConvertHTMLToPDF(data.HTMLBody)
-		if pdfErr != nil {
-			log.Printf("Warning: Failed to convert HTML to PDF using Rod: %v", pdfErr)
-			// PDF is optional, so we don't stop processing if conversion fails.
+	if err != nil {
+		return data, fmt.Errorf("failed to parse email body: %w", err)
+	}
+
+	// 4. Генерируем PDF если есть HTML
+	if data.HasHTML && data.HTMLBody != "" {
+		pdfBytes, err := ConvertHTMLToPDF(data.HTMLBody)
+		if err != nil {
+			log.Printf("Warning: PDF generation failed: %v", err)
 		} else {
 			data.PDFBody = pdfBytes
-			log.Printf("Successfully converted HTML to PDF using Rod, stored %d bytes.", len(data.PDFBody))
 		}
 	}
 
 	return data, nil
 }
+
+func parseMultipartMessage(msg *mail.Message, data *ParsedEmailData, boundary string) error {
+	mr := multipart.NewReader(msg.Body, boundary)
+
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Printf("Error reading multipart: %v", err)
+			continue
+		}
+
+		contentType := part.Header.Get("Content-Type")
+		mediaType, _, _ := mime.ParseMediaType(contentType)
+
+		// Обрабатываем вложения
+		if filename := getAttachmentFilename(part); filename != "" {
+			attachmentData, err := decodePartBody(part)
+			if err != nil {
+				log.Printf("Error decoding attachment: %v", err)
+				continue
+			}
+			data.Attachments[filename] = attachmentData
+			continue
+		}
+
+		// Обрабатываем текстовые части
+		bodyBytes, err := decodePartBody(part)
+		if err != nil {
+			log.Printf("Error decoding part body: %v", err)
+			continue
+		}
+
+		switch mediaType {
+		case "text/plain":
+			if !data.HasText { // Берем только первый текстовый блок
+				data.TextBody = string(bodyBytes)
+				data.HasText = true
+			}
+		case "text/html":
+			if !data.HasHTML { // Берем только первый HTML блок
+				data.HTMLBody = string(bodyBytes)
+				data.HasHTML = true
+			}
+		}
+
+		part.Close()
+	}
+	return nil
+}
+
+func parseSinglePartMessage(msg *mail.Message, data *ParsedEmailData, mediaType string) error {
+	bodyBytes, err := io.ReadAll(msg.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read message body: %w", err)
+	}
+
+	switch mediaType {
+	case "text/plain":
+		data.TextBody = string(bodyBytes)
+		data.HasText = true
+	case "text/html":
+		data.HTMLBody = string(bodyBytes)
+		data.HasHTML = true
+	default:
+		// Если тип неизвестен, пробуем определить автоматически
+		if isHTML(bodyBytes) {
+			data.HTMLBody = string(bodyBytes)
+			data.HasHTML = true
+		} else {
+			data.TextBody = string(bodyBytes)
+			data.HasText = true
+		}
+	}
+	return nil
+}
+
+func getAttachmentFilename(part *multipart.Part) string {
+	// 1. Проверяем Content-Disposition
+	_, params, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+	if filename := params["filename"]; filename != "" {
+		return filename
+	}
+
+	// 2. Проверяем name в Content-Type
+	_, partParams, _ := mime.ParseMediaType(part.Header.Get("Content-Type"))
+	if filename := partParams["name"]; filename != "" {
+		return filename
+	}
+
+	// 3. Не является вложением
+	return ""
+}
+
+func isHTML(content []byte) bool {
+	// Простая проверка по наличию HTML тегов
+	return bytes.Contains(content, []byte("<html")) ||
+		bytes.Contains(content, []byte("<HTML")) ||
+		bytes.Contains(content, []byte("<!DOCTYPE html"))
+}
+
+// Helper: Extract unsubscribe link
+func extractUnsubscribeLink(header string) string {
+	parts := strings.Split(header, ",")
+	for _, part := range parts {
+		clean := strings.TrimSpace(part)
+		if strings.HasPrefix(clean, "<") && strings.HasSuffix(clean, ">") {
+			url := clean[1 : len(clean)-1]
+			if strings.HasPrefix(url, "http") {
+				return url
+			}
+		}
+	}
+	return ""
+}
+
+// Helper: Process single part message
+// func processSinglePart(mediaType string, body []byte, contentType string, data *ParsedEmailData) {
+// 	decoded, _ := decodeText(body, contentType)
+
+// 	switch mediaType {
+// 	case "text/plain":
+// 		data.TextBody = decoded
+// 		data.HasText = true
+// 	case "text/html":
+// 		data.HTMLBody = decoded
+// 		data.HasHTML = true
+// 	default:
+// 		filename := "attachment"
+// 		if name, _, _ := mime.ParseMediaType(contentType); name != "" {
+// 			filename = name
+// 		}
+// 		data.Attachments[filename] = body
+// 	}
+// }
+
+// Helper: Process multipart part
+// func processEmailPart(part *multipart.Part, data *ParsedEmailData) error {
+// 	contentType := part.Header.Get("Content-Type")
+// 	mediaType, _, _ := mime.ParseMediaType(contentType)
+
+// 	// Handle content disposition
+// 	disposition, params, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+// 	filename := params["filename"]
+// 	if filename == "" {
+// 		filename = fmt.Sprintf("attachment-%d", len(data.Attachments)+1)
+// 	}
+
+// 	bodyBytes, err := decodePartBody(part)
+// 	if err != nil {
+// 		return fmt.Errorf("part decode failed: %w", err)
+// 	}
+
+// 	switch {
+// 	case disposition == "attachment" || (disposition == "inline" && filename != ""):
+// 		data.Attachments[filename] = bodyBytes
+// 		log.Printf("Stored attachment: %s (%d bytes)", filename, len(bodyBytes))
+
+// 	case mediaType == "text/plain":
+// 		decoded, _ := decodeText(bodyBytes, contentType)
+// 		data.TextBody = decoded
+// 		data.HasText = true
+
+// 	case mediaType == "text/html":
+// 		decoded, _ := decodeText(bodyBytes, contentType)
+// 		data.HTMLBody = decoded
+// 		data.HasHTML = true
+
+// 	default:
+// 		log.Printf("Skipping unhandled part: %s", mediaType)
+// 	}
+
+// 	return nil
+// }
+*/
