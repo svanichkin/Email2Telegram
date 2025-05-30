@@ -3,36 +3,20 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"image"
-	"image/draw"
-	"image/jpeg"
-	"io"
 	"strings"
-	"time"
 	"unicode"
 
-	"github.com/go-rod/rod"
-	"github.com/go-rod/rod/lib/launcher"
-	"github.com/go-rod/rod/lib/proto"
 	"github.com/jhillyerd/enmime"
-
-	xdraw "golang.org/x/image/draw"
+	"golang.org/x/net/html"
 )
 
 // ParsedEmailData holds extracted information from an email
 type ParsedEmailData struct {
-	From            string
-	To              string
-	Subject         string
-	UnsubscribeLink string
-	TextBody        string // Только plain text
-	HTMLBody        string // Только HTML
-	HasText         bool   // Явное указание наличия текста
-	HasHTML         bool   // Явное указание наличия HTML
-	PDFBody         []byte
-	PDFName         string
-	PDFPreview      []byte
-	Attachments     map[string][]byte
+	From        string
+	To          []string
+	Subject     string
+	TextBody    string
+	Attachments map[string][]byte
 }
 
 func ParseEmail(raw []byte) (*ParsedEmailData, error) {
@@ -42,15 +26,25 @@ func ParseEmail(raw []byte) (*ParsedEmailData, error) {
 	}
 
 	data := &ParsedEmailData{
-		From:            env.GetHeader("From"),
-		To:              env.GetHeader("To"),
-		Subject:         env.GetHeader("Subject"),
-		UnsubscribeLink: extractUnsubscribeLink(env.GetHeader("List-Unsubscribe")),
-		TextBody:        env.Text,
-		HTMLBody:        env.HTML,
-		HasText:         env.Text != "",
-		HasHTML:         env.HTML != "",
-		Attachments:     make(map[string][]byte),
+		Subject:     env.GetHeader("Subject"),
+		TextBody:    env.Text,
+		Attachments: make(map[string][]byte),
+	}
+
+	// Обработка From
+	if from := env.GetHeader("From"); from != "" {
+		data.From = cleanAddress(from)
+	}
+
+	// Обработка To
+	if to := env.GetHeader("To"); to != "" {
+		data.To = parseAddressList(to)
+	} else {
+		data.To = []string{}
+	}
+
+	if env.HTML != "" {
+		data.TextBody = extractTextAndLinks(env.HTML)
 	}
 
 	// Обработка вложений
@@ -58,195 +52,194 @@ func ParseEmail(raw []byte) (*ParsedEmailData, error) {
 		data.Attachments[att.FileName] = att.Content
 	}
 
-	// Генерация PDF
-	if data.HasHTML {
-		if pdf, preview, err := ConvertHTMLToPDF(data.HTMLBody); err == nil {
-			data.PDFName = SanitizeFileName(data.Subject) + ".pdf"
-			data.PDFBody = pdf
-			data.PDFPreview = preview
-		}
-	}
-
 	return data, nil
 }
 
-func SanitizeFileName(name string) string {
+func sanitizeToPrintable(s string) string {
 	var b strings.Builder
-	for _, r := range name {
-		// Запрещённые символы в Windows для имён файлов:
-		// \ / : * ? " < > | и управляющие символы (r < 32)
-		if r < 32 {
-			continue
-		}
-		switch r {
-		case '\\', '/', ':', '*', '?', '"', '<', '>', '|':
-			continue
-		}
-
-		// Разрешаем буквы (любой язык), цифры, пробел, тире, подчёркивание, точку
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || r == '-' || r == '_' || r == '.' {
+	for _, r := range s {
+		if unicode.IsLetter(r) ||
+			unicode.IsDigit(r) ||
+			unicode.IsPunct(r) ||
+			r == ' ' || r == '\n' || r == '\t' || r == '+' {
 			b.WriteRune(r)
-			continue
+		}
+	}
+	return b.String()
+}
+
+func extractTextAndLinks(htmlInput string) string {
+	doc, err := html.Parse(strings.NewReader(htmlInput))
+	if err != nil {
+		return ""
+	}
+
+	var b strings.Builder
+
+	skipTags := map[string]struct{}{
+		"script": {}, "style": {}, "img": {}, "head": {},
+	}
+
+	lineBreakTags := map[string]struct{}{
+		"br": {}, "p": {}, "div": {}, "li": {}, "tr": {},
+	}
+
+	var render func(*html.Node)
+	render = func(n *html.Node) {
+		if n == nil {
+			return
 		}
 
-		// Простая проверка для эмодзи (часть диапазонов)
-		if (r >= 0x1F300 && r <= 0x1FAFF) || (r >= 0x2600 && r <= 0x26FF) {
-			b.WriteRune(r)
-			continue
+		if n.Type == html.ElementNode {
+			if _, skip := skipTags[n.Data]; skip {
+				return
+			}
+
+			if n.Data == "a" {
+				href := ""
+				for _, attr := range n.Attr {
+					if attr.Key == "href" {
+						href = attr.Val
+						break
+					}
+				}
+				textInside := getText(n)
+				textInside = strings.TrimSpace(textInside)
+
+				if textInside != "" && href != "" {
+					// поставим пробел, если он нужен:
+					appendSpaceIfNeeded(&b)
+					b.WriteString(fmt.Sprintf("[%s](%s)", textInside, href))
+					appendSpaceIfNeeded(&b)
+					return
+				}
+			}
 		}
 
-		// Все остальные символы пропускаем
-	}
+		if n.Type == html.TextNode {
+			data := strings.TrimSpace(n.Data)
+			if data != "" {
+				appendSpaceIfNeeded(&b)
+				b.WriteString(data)
+				appendSpaceIfNeeded(&b)
+			}
+		} else {
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				render(c)
+			}
+		}
 
-	// Удаляем пробелы в начале и конце
-	return strings.TrimSpace(b.String())
-}
-
-func ConvertHTMLToPDF(htmlContent string) (pdfBytes []byte, previewJpeg []byte, err error) {
-	if htmlContent == "" {
-		err = fmt.Errorf("HTML content is empty")
-		return
-	}
-
-	// Автоматический запуск браузера
-	l := launcher.New().
-		Headless(true).
-		NoSandbox(true)
-
-	url, lerr := l.Launch()
-	if lerr != nil {
-		err = fmt.Errorf("failed to launch browser: %w", lerr)
-		return
-	}
-
-	browser := rod.New().ControlURL(url).MustConnect()
-	defer browser.MustClose()
-
-	page, perr := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
-	if perr != nil {
-		err = fmt.Errorf("failed to create page: %w", perr)
-		return
-	}
-	defer page.MustClose()
-
-	// Устанавливаем контент страницы
-	if serr := page.SetDocumentContent(htmlContent); serr != nil {
-		err = fmt.Errorf("failed to set content: %w", serr)
-		return
-	}
-
-	// 1. Ожидаем полной загрузки страницы
-	page.WaitLoad()
-
-	// Ждем загрузки всех изображений
-	page.Eval(`() => {
-	    return Promise.all(
-	        Array.from(document.images).map(img => {
-	            if (img.complete) return Promise.resolve();
-	            return new Promise((resolve) => {
-	                img.addEventListener('load', resolve);
-	                img.addEventListener('error', resolve);
-	            });
-	        })
-	    );
-	}`)
-
-	// 3. Добавляем дополнительную задержку для надежности
-	time.Sleep(10 * time.Second)
-
-	// Параметры PDF
-	scale := 1.0
-	paperWidth := 8.27
-	paperHeight := 11.69
-
-	pdfOpts := &proto.PagePrintToPDF{
-		PrintBackground:   true,
-		Scale:             &scale,
-		PreferCSSPageSize: true,
-		PaperWidth:        &paperWidth,
-		PaperHeight:       &paperHeight,
-	}
-
-	// Генерация PDF
-	pdfStream, perr := page.PDF(pdfOpts)
-	if perr != nil {
-		err = fmt.Errorf("PDF generation failed: %w", perr)
-		return
-	}
-
-	pdfBytes, perr = io.ReadAll(pdfStream)
-	if perr != nil {
-		err = fmt.Errorf("failed to read PDF stream: %w", perr)
-		return
-	}
-
-	// Генерация превью JPEG (скриншот всей страницы)
-	quality := 90
-	screenshot, serr := page.Screenshot(false, &proto.PageCaptureScreenshot{
-		Format:  proto.PageCaptureScreenshotFormatPng,
-		Quality: &quality,
-	})
-	if serr != nil {
-		err = fmt.Errorf("failed to capture screenshot: %w", serr)
-		return
-	}
-
-	// Преобразуем PNG → image.Image
-	img, _, derr := image.Decode(bytes.NewReader(screenshot))
-	if derr != nil {
-		err = fmt.Errorf("failed to decode screenshot: %w", derr)
-		return
-	}
-
-	// Кроп в квадрат и ресайз
-	square := cropToSquare(img)
-	resized := resizeImage(square, 320, 320)
-
-	var jpegBuf bytes.Buffer
-	if jerr := jpeg.Encode(&jpegBuf, resized, &jpeg.Options{Quality: 80}); jerr != nil {
-		err = fmt.Errorf("failed to encode JPEG: %w", jerr)
-		return
-	}
-
-	if jpegBuf.Len() > 200*1024 {
-		err = fmt.Errorf("preview too large: %d bytes", jpegBuf.Len())
-		return
-	}
-
-	previewJpeg = jpegBuf.Bytes()
-	return
-}
-
-func cropToSquare(src image.Image) image.Image {
-	b := src.Bounds()
-	w, h := b.Dx(), b.Dy()
-	size := w
-	if h < w {
-		size = h
-	}
-	// crop сверху (offsetY = 0)
-	square := image.NewRGBA(image.Rect(0, 0, size, size))
-	draw.Draw(square, square.Bounds(), src, image.Pt(b.Min.X, b.Min.Y), draw.Src)
-	return square
-}
-
-func resizeImage(img image.Image, width, height int) image.Image {
-	dst := image.NewRGBA(image.Rect(0, 0, width, height))
-	xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), img, img.Bounds(), draw.Over, nil)
-	return dst
-}
-
-// Helper: Extract unsubscribe link
-func extractUnsubscribeLink(header string) string {
-	parts := strings.Split(header, ",")
-	for _, part := range parts {
-		clean := strings.TrimSpace(part)
-		if strings.HasPrefix(clean, "<") && strings.HasSuffix(clean, ">") {
-			url := clean[1 : len(clean)-1]
-			if strings.HasPrefix(url, "http") {
-				return url
+		if n.Type == html.ElementNode {
+			if _, br := lineBreakTags[n.Data]; br {
+				b.WriteString("\n")
 			}
 		}
 	}
-	return ""
+
+	render(doc)
+	result := condenseSpaceAndLines(b.String())
+	result = sanitizeToPrintable(result)
+	return result
+}
+
+// Функция вставляет пробел, если последний символ не пробельный и не перевод строки
+func appendSpaceIfNeeded(b *strings.Builder) {
+	if b.Len() == 0 {
+		return
+	}
+	lastChar, _, _ := strings.Cut(b.String()[b.Len()-1:], "")
+	if lastChar != " " && lastChar != "\n" {
+		b.WriteByte(' ')
+	}
+}
+
+// Возвращает только текстовое содержимое node (даже если there are inline теги внутри, например <strong>)
+func getText(n *html.Node) string {
+	var text strings.Builder
+	var f func(*html.Node)
+	f = func(node *html.Node) {
+		if node.Type == html.TextNode {
+			text.WriteString(node.Data)
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			f(c)
+		}
+	}
+	f(n)
+	return text.String()
+}
+
+// Функция для удаления лишних пробелов и пустых строк, оставлять максимум 1 пустую строку между абзацами
+func condenseSpaceAndLines(s string) string {
+	lines := strings.Split(s, "\n")
+	var out []string
+	prevEmpty := true
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			if !prevEmpty {
+				out = append(out, "")
+			}
+			prevEmpty = true
+		} else {
+			out = append(out, l)
+			prevEmpty = false
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func cleanAddress(addr string) string {
+	// Удаляем двойные кавычки
+	addr = strings.ReplaceAll(addr, "\"", "")
+
+	// Убираем угловые скобки, сохраняя их содержимое
+	if start := strings.Index(addr, "<"); start != -1 {
+		if end := strings.Index(addr, ">"); end != -1 && end > start {
+			email := strings.TrimSpace(addr[start+1 : end])
+			name := strings.TrimSpace(addr[:start])
+
+			if name != "" {
+				return fmt.Sprintf("%s %s", email, name)
+			}
+			return email
+		}
+	}
+	return strings.TrimSpace(addr)
+}
+
+func parseAddressList(header string) []string {
+	var addresses []string
+	current := ""
+	inQuotes := false
+	inAngle := false
+
+	for _, r := range header {
+		switch {
+		case r == '"':
+			inQuotes = !inQuotes
+			current += string(r)
+		case r == '<':
+			inAngle = true
+			current += string(r)
+		case r == '>':
+			inAngle = false
+			current += string(r)
+		case r == ',' && !inQuotes && !inAngle:
+			addr := cleanAddress(current)
+			if addr != "" {
+				addresses = append(addresses, addr)
+			}
+			current = ""
+		default:
+			current += string(r)
+		}
+	}
+
+	// Добавляем последний адрес
+	if addr := cleanAddress(current); addr != "" {
+		addresses = append(addresses, addr)
+	}
+
+	return addresses
 }

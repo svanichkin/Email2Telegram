@@ -186,17 +186,17 @@ func (ec *EmailClient) FetchMail(uid uint32) (*mail.Message, []byte, error) {
 		return nil, nil, fmt.Errorf("could not find body for message UID %d", uid)
 	}
 
-	// TeeReader сохраняет копию в буфер
-	var buf bytes.Buffer
-	tee := io.TeeReader(bodyReader, &buf)
-
-	parsedMail, err := mail.ReadMessage(tee)
+	data, err := io.ReadAll(bodyReader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse email content for UID %d: %w", uid, err)
+		return nil, nil, fmt.Errorf("failed to read body for UID %d: %w", uid, err)
 	}
 
-	log.Printf("Successfully fetched and parsed email with UID %d, Subject: %s", uid, parsedMail.Header.Get("Subject"))
-	return parsedMail, buf.Bytes(), nil
+	parsedMail, err := mail.ReadMessage(bytes.NewReader(data))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse email for UID %d: %w", uid, err)
+	}
+
+	return parsedMail, data, nil
 }
 
 // MarkUIDAsProcessed adds the UID to the in-memory map and saves it to the file.

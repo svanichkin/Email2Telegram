@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -72,6 +73,8 @@ func (tb *TelegramBot) RequestPassword(prompt string) (string, error) {
 	}
 }
 
+const maxLen = 3800
+
 // SendEmailData sends the parsed email data to the configured user.
 func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	if tb.api == nil {
@@ -84,51 +87,31 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	var cumulativeError error
 
 	// 1. Main Message (Subject + Text Body)
-	const maxLen = 3800 // безопасный лимит
+	// безопасный лимит
 	var messages []string
-	if !data.HasHTML && data.TextBody != "" {
-		text := fmt.Sprintf("*From:* %s\n*To:* %s\n\n*%s*\n\n%s", data.From, data.To, data.Subject, data.TextBody)
-		for len(text) > 0 {
-			if len(text) > maxLen {
-				messages = append(messages, text[:maxLen])
-				text = text[maxLen:]
-			} else {
-				messages = append(messages, text)
-				break
-			}
-		}
+	text := fmt.Sprintf("*From:* %s\n*To:* %s\n\n*%s*\n\n%s", data.From, data.To, data.Subject, data.TextBody)
+	messages = SplitText(text)
+	// for len(text) > 0 {
+	// 	if len(text) > maxLen {
+	// 		messages = append(messages, text[:maxLen])
+	// 		text = text[maxLen:]
+	// 	} else {
+	// 		messages = append(messages, text)
+	// 		break
+	// 	}
+	// }
 
-		log.Printf("Attempting to send main email message (Subject: %s) to chat ID %d", data.Subject, tb.allowedUserID)
-		for i := range len(messages) {
-			msg := tgbotapi.NewMessage(tb.allowedUserID, messages[i])
-			msg.ParseMode = "Markdown"
-			if _, err := tb.api.Send(msg); err != nil {
-				log.Printf("Error sending main message: %v", err)
-				if cumulativeError == nil {
-					cumulativeError = fmt.Errorf("failed to send main message: %w", err)
-				} else {
-					cumulativeError = fmt.Errorf("%v; failed to send main message: %w", cumulativeError, err)
-				}
-			}
-		}
-	}
-
-	// 2. PDF Attachment
-	if data.PDFBody != nil {
-		pdfFile := tgbotapi.FileBytes{Name: data.PDFName, Bytes: data.PDFBody}
-		docMsg := tgbotapi.NewDocument(tb.allowedUserID, pdfFile)
-		docMsg.Caption = fmt.Sprintf("From: %s\nTo: %s\n\n%s", data.From, data.To, data.Subject)
-		docMsg.Thumb = tgbotapi.FileBytes{
-			Name:  data.PDFName,
-			Bytes: data.PDFPreview,
-		}
-		log.Printf("Attempting to send PDF attachment (%s, size: %d bytes) to chat ID %d", data.PDFName, len(data.PDFBody), tb.allowedUserID)
-		if _, err := tb.api.Send(docMsg); err != nil {
-			log.Printf("Error sending PDF attachment: %v", err)
+	log.Printf("Attempting to send main email message (Subject: %s) to chat ID %d", data.Subject, tb.allowedUserID)
+	for i := range len(messages) {
+		msg := tgbotapi.NewMessage(tb.allowedUserID, messages[i])
+		msg.ParseMode = "Markdown"
+		msg.DisableWebPagePreview = true
+		if _, err := tb.api.Send(msg); err != nil {
+			log.Printf("Error sending main message: %v", err)
 			if cumulativeError == nil {
-				cumulativeError = fmt.Errorf("failed to send PDF: %w", err)
+				cumulativeError = fmt.Errorf("failed to send main message: %w", err)
 			} else {
-				cumulativeError = fmt.Errorf("%v; failed to send PDF: %w", cumulativeError, err)
+				cumulativeError = fmt.Errorf("%v; failed to send main message: %w", cumulativeError, err)
 			}
 		}
 	}
@@ -155,22 +138,61 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 		}
 	}
 
-	// 4. Unsubscribe Link
-	if data.UnsubscribeLink != "" {
-		unsubscribeMessageText := fmt.Sprintf("[Unsubscribe](%s)", data.UnsubscribeLink)
-		unsMsg := tgbotapi.NewMessage(tb.allowedUserID, unsubscribeMessageText)
-		unsMsg.DisableWebPagePreview = true
-		unsMsg.ParseMode = "Markdown"
-		log.Printf("Attempting to send unsubscribe link to chat ID %d: %s", tb.allowedUserID, data.UnsubscribeLink)
-		if _, err := tb.api.Send(unsMsg); err != nil {
-			log.Printf("Error sending unsubscribe link: %v", err)
-			if cumulativeError == nil {
-				cumulativeError = fmt.Errorf("failed to send unsubscribe link: %w", err)
+	return cumulativeError
+}
+
+func SplitText(text string) []string {
+	var messages []string
+	lines := strings.Split(text, "\n") // Делим текст на строки
+	currentBlock := ""
+
+	for _, line := range lines {
+		// Пробуем добавить текущую строку к блоку
+		proposedBlock := currentBlock
+		if proposedBlock != "" {
+			proposedBlock += "\n" // Добавляем перенос между строками
+		}
+		proposedBlock += line
+
+		// Если блок превысил лимит
+		if len(proposedBlock) > maxLen {
+			if currentBlock == "" {
+				// Экстренный случай: одна строка длиннее maxLen
+				messages = append(messages, splitLongLine(line, maxLen)...)
 			} else {
-				cumulativeError = fmt.Errorf("%v; failed to send unsubscribe link: %w", cumulativeError, err)
+				// Сохраняем текущий блок и начинаем новый с этой строки
+				messages = append(messages, currentBlock)
+				currentBlock = line
 			}
+		} else {
+			// Блок в пределах лимита - сохраняем изменения
+			currentBlock = proposedBlock
 		}
 	}
 
-	return cumulativeError
+	// Добавляем последний блок
+	if currentBlock != "" {
+		messages = append(messages, currentBlock)
+	}
+	return messages
+}
+
+func splitLongLine(line string, maxLen int) []string {
+	var parts []string
+	for len(line) > 0 {
+		if len(line) <= maxLen {
+			parts = append(parts, line)
+			break
+		}
+
+		// Ищем безопасное место для разрыва (последний пробел перед лимитом)
+		splitAt := strings.LastIndex(line[:maxLen], " ")
+		if splitAt <= 0 {
+			splitAt = maxLen // Если пробелов нет - делим по лимиту
+		}
+
+		parts = append(parts, line[:splitAt])
+		line = line[splitAt:]
+	}
+	return parts
 }
