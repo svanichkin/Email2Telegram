@@ -3,27 +3,36 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"log"
+	"net/mail"
+	"regexp"
 	"strings"
-	"unicode"
+
+	"github.com/PuerkitoBio/goquery"
+	"github.com/microcosm-cc/bluemonday"
 
 	"github.com/jhillyerd/enmime"
-	"golang.org/x/net/html"
 )
 
 // ParsedEmailData holds extracted information from an email
 type ParsedEmailData struct {
 	From        string
-	To          []string
+	To          string
 	Subject     string
 	TextBody    string
 	Attachments map[string][]byte
 }
 
 func ParseEmail(raw []byte) (*ParsedEmailData, error) {
+
+	// Eml reader
+
 	env, err := enmime.ReadEnvelope(bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}
+
+	// Compile fields
 
 	data := &ParsedEmailData{
 		Subject:     env.GetHeader("Subject"),
@@ -31,23 +40,20 @@ func ParseEmail(raw []byte) (*ParsedEmailData, error) {
 		Attachments: make(map[string][]byte),
 	}
 
-	// Обработка From
 	if from := env.GetHeader("From"); from != "" {
-		data.From = cleanAddress(from)
+		data.From = parseAddressList(from)
 	}
-
-	// Обработка To
 	if to := env.GetHeader("To"); to != "" {
 		data.To = parseAddressList(to)
 	} else {
-		data.To = []string{}
+		data.To = ""
 	}
-
 	if env.HTML != "" {
-		data.TextBody = extractTextAndLinks(env.HTML)
+		data.TextBody = CleanTelegramHTML(env.HTML)
 	}
 
-	// Обработка вложений
+	// Attachments
+
 	for _, att := range env.Attachments {
 		data.Attachments[att.FileName] = att.Content
 	}
@@ -55,191 +61,125 @@ func ParseEmail(raw []byte) (*ParsedEmailData, error) {
 	return data, nil
 }
 
-func sanitizeToPrintable(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if unicode.IsLetter(r) ||
-			unicode.IsDigit(r) ||
-			unicode.IsPunct(r) ||
-			r == ' ' || r == '\n' || r == '\t' || r == '+' {
-			b.WriteRune(r)
+func CleanTelegramHTML(raw string) string {
+
+	raw = sanitizeHTML(raw)
+	raw = strings.ToValidUTF8(raw, "")
+	raw = strings.NewReplacer(
+		"⠀", " ",
+		"　", " ",
+		" ", " ",
+		" ", " ",
+		"\u200c", " ",
+		"\u00a0͏", " ",
+		"\u00a0", " ",
+		"\u034f", " ",
+		"\t", "",
+		"\r", "",
+		"<br>", "\n",
+		"<br />", "\n",
+		"<br/>", "\n",
+		"<p>", "\n",
+		"</p>", "\n",
+		"<strong>", "<b>",
+		"</strong>", "</b>",
+		"<em>", "<i>",
+		"</em>", "</i>",
+		"<strike>", "<s>",
+		"</strike>", "</s>",
+		"<del>", "<s>",
+		"</del>", "</s>",
+	).Replace(raw)
+	raw = regexp.MustCompile(` {3,}`).ReplaceAllString(raw, "\n")
+	raw = strings.NewReplacer(
+		"\n ", " ",
+		" \n", "\n",
+	).Replace(raw)
+	reNewlines := regexp.MustCompile(`(\n[\s]*){2,}`)
+	for {
+		old := raw
+		raw = reNewlines.ReplaceAllString(raw, "\n")
+		if raw == old {
+			break
 		}
 	}
-	return b.String()
+	raw = regexp.MustCompile(`\n.{1}\n`).ReplaceAllString(raw, "\n")
+	for {
+		old := raw
+		raw = reNewlines.ReplaceAllString(raw, "\n")
+		if raw == old {
+			break
+		}
+	}
+	raw = strings.NewReplacer(
+		"\n<a href", "\n\n<a href",
+		"</a>\n", "</a>\n\n",
+		"\n<b", "\n\n<b",
+		"</b>\n", "</b>\n\n",
+	).Replace(raw)
+	raw = regexp.MustCompile(`\n +`).ReplaceAllString(raw, "\n")
+	raw = strings.TrimLeft(raw, "\n")
+	raw = strings.TrimRight(raw, "\n")
+	raw = strings.TrimLeft(raw, " ")
+	raw = strings.TrimRight(raw, " ")
+	fmt.Print(raw)
+
+	return raw
 }
 
-func extractTextAndLinks(htmlInput string) string {
-	doc, err := html.Parse(strings.NewReader(htmlInput))
+func sanitizeHTML(html string) string {
+
+	p := bluemonday.NewPolicy()
+	p.AllowElements("b", "strong", "i", "em", "u", "s", "strike", "del", "a", "code", "pre", "p", "br")
+	p.AllowAttrs("href").OnElements("a")
+	html = p.Sanitize(html)
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
-		return ""
+		return html
 	}
 
-	var b strings.Builder
+	// Empty a href remove
 
-	skipTags := map[string]struct{}{
-		"script": {}, "style": {}, "img": {}, "head": {},
-	}
-
-	lineBreakTags := map[string]struct{}{
-		"br": {}, "p": {}, "div": {}, "li": {}, "tr": {},
-	}
-
-	var render func(*html.Node)
-	render = func(n *html.Node) {
-		if n == nil {
-			return
-		}
-
-		if n.Type == html.ElementNode {
-			if _, skip := skipTags[n.Data]; skip {
-				return
-			}
-
-			if n.Data == "a" {
-				href := ""
-				for _, attr := range n.Attr {
-					if attr.Key == "href" {
-						href = attr.Val
-						break
-					}
-				}
-				textInside := getText(n)
-				textInside = strings.TrimSpace(textInside)
-
-				if textInside != "" && href != "" {
-					// поставим пробел, если он нужен:
-					appendSpaceIfNeeded(&b)
-					b.WriteString(fmt.Sprintf("[%s](%s)", textInside, href))
-					appendSpaceIfNeeded(&b)
-					return
-				}
-			}
-		}
-
-		if n.Type == html.TextNode {
-			data := strings.TrimSpace(n.Data)
-			if data != "" {
-				appendSpaceIfNeeded(&b)
-				b.WriteString(data)
-				appendSpaceIfNeeded(&b)
-			}
+	doc.Find("a").Each(func(i int, s *goquery.Selection) {
+		trimmed := strings.TrimSpace(s.Text())
+		if trimmed == "" && len(s.Children().Nodes) == 0 {
+			s.Remove()
 		} else {
-			for c := n.FirstChild; c != nil; c = c.NextSibling {
-				render(c)
-			}
+			s.SetText(trimmed)
 		}
+	})
 
-		if n.Type == html.ElementNode {
-			if _, br := lineBreakTags[n.Data]; br {
-				b.WriteString("\n")
-			}
-		}
+	// Create html
+
+	html, err = doc.Html()
+	if err != nil {
+		return html
 	}
 
-	render(doc)
-	result := condenseSpaceAndLines(b.String())
-	result = sanitizeToPrintable(result)
-	return result
+	// Clean headers
+
+	html = strings.TrimPrefix(html, "<html><head></head><body>")
+	html = strings.TrimSuffix(html, "</body></html>")
+
+	return html
 }
 
-// Функция вставляет пробел, если последний символ не пробельный и не перевод строки
-func appendSpaceIfNeeded(b *strings.Builder) {
-	if b.Len() == 0 {
-		return
-	}
-	lastChar, _, _ := strings.Cut(b.String()[b.Len()-1:], "")
-	if lastChar != " " && lastChar != "\n" {
-		b.WriteByte(' ')
-	}
-}
+func parseAddressList(header string) string {
 
-// Возвращает только текстовое содержимое node (даже если there are inline теги внутри, например <strong>)
-func getText(n *html.Node) string {
-	var text strings.Builder
-	var f func(*html.Node)
-	f = func(node *html.Node) {
-		if node.Type == html.TextNode {
-			text.WriteString(node.Data)
-		}
-		for c := node.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
+	addrs, err := mail.ParseAddressList(header)
+	if err != nil {
+		log.Fatal(err)
 	}
-	f(n)
-	return text.String()
-}
 
-// Функция для удаления лишних пробелов и пустых строк, оставлять максимум 1 пустую строку между абзацами
-func condenseSpaceAndLines(s string) string {
-	lines := strings.Split(s, "\n")
-	var out []string
-	prevEmpty := true
-	for _, l := range lines {
-		l = strings.TrimSpace(l)
-		if l == "" {
-			if !prevEmpty {
-				out = append(out, "")
-			}
-			prevEmpty = true
+	var result []string
+	for _, addr := range addrs {
+		if addr.Name != "" {
+			result = append(result, fmt.Sprintf("%s %s", addr.Address, addr.Name))
 		} else {
-			out = append(out, l)
-			prevEmpty = false
-		}
-	}
-	return strings.Join(out, "\n")
-}
-
-func cleanAddress(addr string) string {
-	// Удаляем двойные кавычки
-	addr = strings.ReplaceAll(addr, "\"", "")
-
-	// Убираем угловые скобки, сохраняя их содержимое
-	if start := strings.Index(addr, "<"); start != -1 {
-		if end := strings.Index(addr, ">"); end != -1 && end > start {
-			email := strings.TrimSpace(addr[start+1 : end])
-			name := strings.TrimSpace(addr[:start])
-
-			if name != "" {
-				return fmt.Sprintf("%s %s", email, name)
-			}
-			return email
-		}
-	}
-	return strings.TrimSpace(addr)
-}
-
-func parseAddressList(header string) []string {
-	var addresses []string
-	current := ""
-	inQuotes := false
-	inAngle := false
-
-	for _, r := range header {
-		switch {
-		case r == '"':
-			inQuotes = !inQuotes
-			current += string(r)
-		case r == '<':
-			inAngle = true
-			current += string(r)
-		case r == '>':
-			inAngle = false
-			current += string(r)
-		case r == ',' && !inQuotes && !inAngle:
-			addr := cleanAddress(current)
-			if addr != "" {
-				addresses = append(addresses, addr)
-			}
-			current = ""
-		default:
-			current += string(r)
+			result = append(result, addr.Address)
 		}
 	}
 
-	// Добавляем последний адрес
-	if addr := cleanAddress(current); addr != "" {
-		addresses = append(addresses, addr)
-	}
-
-	return addresses
+	return strings.Join(result, ", ")
 }

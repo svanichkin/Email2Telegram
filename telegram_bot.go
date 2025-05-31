@@ -10,28 +10,29 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// TelegramBot holds the bot API and the allowed user ID
 type TelegramBot struct {
 	api           *tgbotapi.BotAPI
 	allowedUserID int64
 }
 
-// NewTelegramBot initializes and returns a new TelegramBot
 func NewTelegramBot(apiToken string, allowedUserID int64) (*TelegramBot, error) {
+
 	bot, err := tgbotapi.NewBotAPI(apiToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Telegram bot API: %w", err)
 	}
-	// bot.Debug = true // Enable debug mode for more verbose output
+	bot.Debug = true // Enable debug mode for more verbose output
 	log.Printf("Authorized on account %s", bot.Self.UserName)
 
 	return &TelegramBot{api: bot, allowedUserID: allowedUserID}, nil
 }
 
-// RequestPassword sends a prompt to the allowed user and waits for their reply.
 func (tb *TelegramBot) RequestPassword(prompt string) (string, error) {
+
+	// Send message for user
+
 	if tb.api == nil {
-		return "", errors.New("Telegram API is not initialized")
+		return "", errors.New("telegram API is not initialized")
 	}
 	msg := tgbotapi.NewMessage(tb.allowedUserID, prompt)
 	if _, err := tb.api.Send(msg); err != nil {
@@ -40,8 +41,11 @@ func (tb *TelegramBot) RequestPassword(prompt string) (string, error) {
 	log.Printf("Sent password prompt to user ID %d: %s", tb.allowedUserID, prompt)
 
 	// Set a timeout for waiting for the password
+
 	timeout := time.After(5 * time.Minute)
+
 	// Configure updates
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60 // Timeout for long polling
 
@@ -56,9 +60,12 @@ func (tb *TelegramBot) RequestPassword(prompt string) (string, error) {
 			}
 
 			// Check if the message is from the allowed user and chat
+
 			if update.Message.From.ID == tb.allowedUserID && update.Message.Chat.ID == tb.allowedUserID {
 				log.Printf("Received reply from user ID %d: %s", tb.allowedUserID, update.Message.Text)
+
 				// Clear any remaining updates in the channel to prevent processing old messages next time.
+
 				for len(updates) > 0 {
 					<-updates
 				}
@@ -73,10 +80,10 @@ func (tb *TelegramBot) RequestPassword(prompt string) (string, error) {
 	}
 }
 
-const maxLen = 3800
+const maxLen = 4000
 
-// SendEmailData sends the parsed email data to the configured user.
 func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
+
 	if tb.api == nil {
 		return errors.New("telegram API is not initialized")
 	}
@@ -86,25 +93,14 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 
 	var cumulativeError error
 
-	// 1. Main Message (Subject + Text Body)
-	// безопасный лимит
 	var messages []string
-	text := fmt.Sprintf("*From:* %s\n*To:* %s\n\n*%s*\n\n%s", data.From, data.To, data.Subject, data.TextBody)
-	messages = SplitText(text)
-	// for len(text) > 0 {
-	// 	if len(text) > maxLen {
-	// 		messages = append(messages, text[:maxLen])
-	// 		text = text[maxLen:]
-	// 	} else {
-	// 		messages = append(messages, text)
-	// 		break
-	// 	}
-	// }
+	text := "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n" + data.TextBody
+	messages = splitHTML(text)
 
 	log.Printf("Attempting to send main email message (Subject: %s) to chat ID %d", data.Subject, tb.allowedUserID)
 	for i := range len(messages) {
 		msg := tgbotapi.NewMessage(tb.allowedUserID, messages[i])
-		msg.ParseMode = "Markdown"
+		msg.ParseMode = "HTML"
 		msg.DisableWebPagePreview = true
 		if _, err := tb.api.Send(msg); err != nil {
 			log.Printf("Error sending main message: %v", err)
@@ -141,58 +137,164 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	return cumulativeError
 }
 
-func SplitText(text string) []string {
-	var messages []string
-	lines := strings.Split(text, "\n") // Делим текст на строки
-	currentBlock := ""
+func splitHTML(text string) []string {
 
-	for _, line := range lines {
-		// Пробуем добавить текущую строку к блоку
-		proposedBlock := currentBlock
-		if proposedBlock != "" {
-			proposedBlock += "\n" // Добавляем перенос между строками
-		}
-		proposedBlock += line
-
-		// Если блок превысил лимит
-		if len(proposedBlock) > maxLen {
-			if currentBlock == "" {
-				// Экстренный случай: одна строка длиннее maxLen
-				messages = append(messages, splitLongLine(line, maxLen)...)
-			} else {
-				// Сохраняем текущий блок и начинаем новый с этой строки
-				messages = append(messages, currentBlock)
-				currentBlock = line
-			}
-		} else {
-			// Блок в пределах лимита - сохраняем изменения
-			currentBlock = proposedBlock
-		}
-	}
-
-	// Добавляем последний блок
-	if currentBlock != "" {
-		messages = append(messages, currentBlock)
-	}
-	return messages
-}
-
-func splitLongLine(line string, maxLen int) []string {
-	var parts []string
-	for len(line) > 0 {
-		if len(line) <= maxLen {
-			parts = append(parts, line)
+	var blocks []string
+	for len(text) > 0 {
+		if len(text) < maxLen {
+			blocks = append(blocks, text)
 			break
 		}
+		cut := cutTextBeforePos(text, maxLen)
+		cut, pos, open := findCutPoint(cut)
+		if cut == "" {
+			blocks = append(blocks, cutTextBeforePos(text, maxLen))
+			text = cutTextAfterPos(text, maxLen)
+		} else {
+			blocks = append(blocks, cut)
+			text = open + cutTextAfterPos(text, pos)
+		}
+	}
 
-		// Ищем безопасное место для разрыва (последний пробел перед лимитом)
-		splitAt := strings.LastIndex(line[:maxLen], " ")
-		if splitAt <= 0 {
-			splitAt = maxLen // Если пробелов нет - делим по лимиту
+	return blocks
+}
+
+// Get text maxLen, then find cut point
+func findCutPoint(cut string) (string, int, string) {
+
+	positions := []int{
+		findLastTagPosition(cut, "</a>", "\n"),
+		findLastTagPosition(cut, "</b>", ""),
+		findLastTagPosition(cut, "</code>", ""),
+		findLastTagPosition(cut, "</i>", ""),
+		findLastTagPosition(cut, "</pre>", ""),
+		findLastTagPosition(cut, "</s>", ""),
+		findLastTagPosition(cut, "</u>", ""),
+	}
+	maxPos := -1
+	for _, pos := range positions {
+		if pos > maxPos {
+			maxPos = pos
+		}
+	}
+	nPos := findLastTagPosition(cut, "\n", "")
+	if nPos == -1 {
+		nPos = findLastPrefixLeftPosition(cut, "<a href=")
+	}
+	if maxPos < nPos {
+		maxPos = nPos
+	}
+	cut = cutTextBeforePos(cut, maxPos)
+	open, close := findEnclosingTags(cut, nPos)
+	if len(close) > 0 {
+		cut = cut + close
+	}
+
+	return cut, maxPos, open
+}
+
+func cutTextBeforePos(text string, pos int) string {
+
+	if pos > len(text) {
+		pos = len(text)
+	}
+	if pos < 0 {
+		pos = 0
+	}
+
+	return text[:pos]
+}
+
+func cutTextAfterPos(text string, pos int) string {
+
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(text) {
+		pos = len(text)
+	}
+
+	return text[pos:]
+}
+
+func findLastTagPosition(text, prefix, postfix string) int {
+
+	lastPos := -1
+	offset := 0
+	for {
+		idx := strings.Index(text[offset:], prefix)
+		if idx == -1 {
+			break
+		}
+		absoluteIdx := offset + idx
+		pos := absoluteIdx + len(prefix)
+
+		hasPostfix := false
+		if postfix == "" {
+			hasPostfix = true
+		} else if pos <= len(text)-len(postfix) && strings.HasPrefix(text[pos:], postfix) {
+			hasPostfix = true
 		}
 
-		parts = append(parts, line[:splitAt])
-		line = line[splitAt:]
+		if hasPostfix {
+			lastPos = pos
+		}
+		offset = absoluteIdx + 1
 	}
-	return parts
+
+	return lastPos
+}
+
+func findLastPrefixLeftPosition(text, prefix string) int {
+
+	lastPos := -1
+	offset := 0
+	for {
+		idx := strings.Index(text[offset:], prefix)
+		if idx == -1 {
+			break
+		}
+		absoluteIdx := offset + idx
+		lastPos = absoluteIdx
+		offset = absoluteIdx + 1 // ищем все вхождения, даже перекрывающиеся
+	}
+
+	return lastPos
+}
+
+func findEnclosingTags(text string, pos int) (string, string) {
+
+	if pos > len(text) {
+		pos = len(text)
+	}
+	i := pos - 1
+	for i >= 0 {
+		if text[i] == '<' {
+			// search start tag
+			end := i + 1
+			for end < len(text) && text[end] != '>' {
+				end++
+			}
+			if end >= len(text) {
+				break
+			}
+			tagContent := text[i+1 : end]
+			tagParts := strings.Fields(tagContent)
+			if len(tagParts) == 0 {
+				break
+			}
+			tagName := tagParts[0]
+			// if closed tag - skip
+			if strings.HasPrefix(tagName, "/") {
+				return "", ""
+			}
+			tagNameClean := strings.Split(tagName, " ")[0]
+			openTag := "<" + tagName + ">"
+			closeTag := "</" + tagNameClean + ">"
+			return openTag, closeTag
+		}
+		i--
+	}
+
+	return "", ""
 }

@@ -12,6 +12,7 @@
 *.eml
 config.ini
 processed_uids.txt
+*.html
 
 # Test binary, built with `go test -c`
 *.test

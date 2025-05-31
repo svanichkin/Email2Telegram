@@ -10,6 +10,15 @@ import (
 )
 
 func main() {
+
+	// data, err := os.ReadFile("test0.html")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// clean := CleanTelegramHTML(string(data))
+	// fmt.Println(clean)
+
+	// return
 	log.Println("Starting Email Processor...")
 
 	// Остальная часть main (конфигурация, IMAP и т.д.)
