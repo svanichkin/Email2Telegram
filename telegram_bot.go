@@ -29,6 +29,7 @@ func NewTelegramBot(apiToken string, allowedUserID int64) (*TelegramBot, error) 
 }
 
 func (t *TelegramBot) StartListener() {
+	
 	updates := t.api.GetUpdatesChan(tgbotapi.UpdateConfig{
 		Timeout: 60,
 	})

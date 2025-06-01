@@ -14,7 +14,6 @@ import (
 	"github.com/jhillyerd/enmime"
 )
 
-// ParsedEmailData holds extracted information from an email
 type ParsedEmailData struct {
 	Uid         uint32
 	From        string
@@ -64,8 +63,8 @@ func ParseEmail(raw []byte, uid uint32) (*ParsedEmailData, error) {
 }
 
 func findAllAttachments(env *enmime.Envelope) []*enmime.Part {
-	var attachments []*enmime.Part
 
+	var attachments []*enmime.Part
 	var walk func(part *enmime.Part)
 	walk = func(part *enmime.Part) {
 		if part == nil {
@@ -80,8 +79,8 @@ func findAllAttachments(env *enmime.Envelope) []*enmime.Part {
 			walk(child)
 		}
 	}
-
 	walk(env.Root)
+
 	return attachments
 }
 
@@ -153,11 +152,12 @@ func CleanTelegramHTML(raw string) string {
 
 func sanitizeHTML(html string) string {
 
+	// Sanitize tags
+
 	p := bluemonday.NewPolicy()
 	p.AllowElements("b", "strong", "i", "em", "u", "s", "strike", "del", "a", "code", "pre", "p", "br")
 	p.AllowAttrs("href").OnElements("a")
 	html = p.Sanitize(html)
-
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return html
@@ -191,10 +191,14 @@ func sanitizeHTML(html string) string {
 
 func parseAddressList(header string) string {
 
+	// Get adresses
+
 	addrs, err := mail.ParseAddressList(header)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Formatting
 
 	var result []string
 	for _, addr := range addrs {
