@@ -90,10 +90,10 @@ func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot) {
 
 	// If first star, ignore all letters
 
-	if uids, err = emailClient.AddAllUIDsIfFirstStart(uids); err != nil {
-		log.Printf("Error marking UIDs as processed on first start: %v", err)
-		return
-	}
+	// if uids, err = emailClient.AddAllUIDsIfFirstStart(uids); err != nil {
+	// 	log.Printf("Error marking UIDs as processed on first start: %v", err)
+	// 	return
+	// }
 
 	// Main cycle for new letters
 

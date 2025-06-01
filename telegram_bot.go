@@ -22,7 +22,7 @@ func NewTelegramBot(apiToken string, allowedUserID int64) (*TelegramBot, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Telegram bot API: %w", err)
 	}
-	bot.Debug = true // Enable debug mode for more verbose output
+	// bot.Debug = true // Enable debug mode for more verbose output
 	log.Printf("Authorized on account %s", bot.Self.UserName)
 
 	return &TelegramBot{api: bot, allowedUserID: allowedUserID}, nil

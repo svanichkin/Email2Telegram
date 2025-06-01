@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/mail"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,66 +19,47 @@ import (
 	"github.com/emersion/go-imap/client"
 )
 
-const processedUIDsFile = "processed_uids.txt"
+const processedUIDFile = "last_processed_uid.txt"
 
-// loadProcessedUIDs reads UIDs from the given file.
-func loadProcessedUIDs(filePath string) (map[uint32]bool, error) {
+func loadLastProcessedUID(filePath string) (uint32, error) {
 
-	uids := make(map[uint32]bool)
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return uids, nil // File doesn't exist, return empty map
+			return 0, nil
 		}
-		return nil, fmt.Errorf("failed to open processed UIDs file: %w", err)
+		return 0, fmt.Errorf("failed to open UID file: %w", err)
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	if scanner.Scan() {
+		val := strings.TrimSpace(scanner.Text())
+		if val == "" {
+			return 0, nil
 		}
-		uid, err := strconv.ParseUint(line, 10, 32)
+		uid64, err := strconv.ParseUint(val, 10, 32)
 		if err != nil {
-			log.Printf("Warning: skipping invalid UID line in %s: %v", filePath, err)
-			continue
+			return 0, fmt.Errorf("invalid last UID: %w", err)
 		}
-		uids[uint32(uid)] = true
+		return uint32(uid64), nil
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading processed UIDs file: %w", err)
-	}
-	log.Printf("Loaded %d processed UIDs from %s", len(uids), filePath)
-
-	return uids, nil
+	return 0, nil
 }
 
-// saveProcessedUID appends the given UID to the file.
-func saveProcessedUID(filePath string, uid uint32) error {
+func saveLastProcessedUID(filePath string, uid uint32) error {
 
-	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open processed UIDs file for writing: %w", err)
-	}
-	defer file.Close()
+	return os.WriteFile(filePath, []byte(fmt.Sprintf("%d\n", uid)), 0644)
 
-	if _, err := file.WriteString(fmt.Sprintf("%d\n", uid)); err != nil {
-		return fmt.Errorf("failed to write UID to processed UIDs file: %w", err)
-	}
-	log.Printf("Saved UID %d to %s", uid, filePath)
-
-	return nil
 }
 
 // EmailClient holds the IMAP client connection and processed UIDs
 type EmailClient struct {
 	client *client.Client
 
-	processedUIDs map[uint32]bool
-	dataMu        sync.Mutex
+	lastProcessedUID uint32
+	dataMu           sync.Mutex
 
 	host     string
 	port     int
@@ -97,30 +79,30 @@ func NewEmailClient(host string, port int, username string, password string) (*E
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to IMAP server: %w", err)
 	}
+	c.SetDebug(os.Stdout)
 
 	if err := c.Login(username, password); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("failed to login: %w", err)
 	}
 
-	uids, err := loadProcessedUIDs(processedUIDsFile)
+	uid, err := loadLastProcessedUID(processedUIDFile)
 	if err != nil {
 		c.Logout()
 		return nil, fmt.Errorf("failed to load processed UIDs: %w", err)
 	}
 
 	return &EmailClient{
-		client:        c,
-		processedUIDs: uids,
-		host:          host,
-		port:          port,
-		username:      username,
-		password:      password,
+		client:           c,
+		lastProcessedUID: uid,
+		host:             host,
+		port:             port,
+		username:         username,
+		password:         password,
 	}, nil
 
 }
 
-// Close logs out the client
 func (ec *EmailClient) Close() {
 
 	if ec.client != nil {
@@ -131,22 +113,15 @@ func (ec *EmailClient) Close() {
 		} else {
 			log.Println("Logged out successfully")
 		}
-		// The underlying connection is typically closed by Logout,
-		// but an explicit Close call can be added if specific client library versions require it.
-		// For emersion/go-imap, Logout generally handles this.
 	}
 
 }
 
-// ListNewMailUIDs fetches all UIDs from INBOX and filters out processed ones.
 func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
 
-	const timeoutSelect = 0 * time.Second
+	// ListNewMailUIDs fetches
 
-	if err := ec.reconnectIfNeeded(); err != nil {
-		return nil, fmt.Errorf("initial reconnect failed: %w", err)
-	}
-
+	const timeoutSelect = 5 * time.Minute
 	mbox, err := ec.selectInboxWithTimeout(timeoutSelect)
 	if err != nil {
 		log.Printf("SELECT INBOX failed (%v), attempting reconnect and retry", err)
@@ -154,8 +129,6 @@ func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
 		if reconErr := ec.reconnectIfNeeded(); reconErr != nil {
 			return nil, fmt.Errorf("reconnect failed after select inbox error: %v (initial select error: %w)", reconErr, err)
 		}
-
-		// повтор, после переподключения
 		mbox, err = ec.selectInboxWithTimeout(timeoutSelect)
 		if err != nil {
 			return nil, fmt.Errorf("select inbox failed again after reconnect: %w", err)
@@ -163,43 +136,39 @@ func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
 	}
 	log.Printf("INBOX selected, mailbox has %d messages", mbox.Messages)
 
-	// затем поиск новых UID
+	// Search new UIDs
+
 	criteria := imap.NewSearchCriteria()
 	criteria.WithoutFlags = []string{imap.DeletedFlag}
-
 	newUIDs, err := ec.uidSearchWithTimeout(criteria, timeoutSelect)
 	if err != nil {
 		log.Printf("UID search failed (%v), attempting reconnect and retry", err)
-
-		// переподключение и повтор
 		if reconErr := ec.reconnectIfNeeded(); reconErr != nil {
 			return nil, fmt.Errorf("reconnect failed after search error: %v (initial search error: %w)", reconErr, err)
 		}
-
-		// Повтор SEARCH после переподключения
 		newUIDs, err = ec.uidSearchWithTimeout(criteria, timeoutSelect)
 		if err != nil {
 			return nil, fmt.Errorf("UID search failed again after reconnect: %w", err)
 		}
 	}
-
 	log.Printf("Found total %d UIDs in INBOX", len(newUIDs))
 
 	ec.dataMu.Lock()
 	defer ec.dataMu.Unlock()
-
-	var unprocessedUIDs []uint32
+	var unprocessed []uint32
 	for _, uid := range newUIDs {
-		if !ec.processedUIDs[uid] {
-			unprocessedUIDs = append(unprocessedUIDs, uid)
+		if uid > ec.lastProcessedUID {
+			unprocessed = append(unprocessed, uid)
 		}
 	}
+	sort.Slice(unprocessed, func(i, j int) bool { return unprocessed[i] < unprocessed[j] })
+	log.Printf("Found %d new unprocessed UIDs", len(unprocessed))
 
-	log.Printf("Found %d new unprocessed UIDs", len(unprocessedUIDs))
-	return unprocessedUIDs, nil
+	return unprocessed, nil
 }
 
 func (ec *EmailClient) selectInboxWithTimeout(timeout time.Duration) (*imap.MailboxStatus, error) {
+
 	resultChan := make(chan struct {
 		mbox *imap.MailboxStatus
 		err  error
@@ -219,9 +188,11 @@ func (ec *EmailClient) selectInboxWithTimeout(timeout time.Duration) (*imap.Mail
 	case <-time.After(timeout):
 		return nil, fmt.Errorf("timeout reached in selectInboxWithTimeout after %v", timeout)
 	}
+
 }
 
 func (ec *EmailClient) uidSearchWithTimeout(criteria *imap.SearchCriteria, timeout time.Duration) ([]uint32, error) {
+
 	resultChan := make(chan struct {
 		uids []uint32
 		err  error
@@ -241,6 +212,7 @@ func (ec *EmailClient) uidSearchWithTimeout(criteria *imap.SearchCriteria, timeo
 	case <-time.After(timeout):
 		return nil, fmt.Errorf("timeout occurred during UID SEARCH after %v", timeout)
 	}
+
 }
 
 // FetchMail fetches the content of a specific email by UID.
@@ -298,36 +270,38 @@ func (ec *EmailClient) FetchMail(uid uint32) (*mail.Message, []byte, error) {
 	return parsedMail, data, nil
 }
 
-// MarkUIDAsProcessed adds the UID to the in-memory map and saves it to the file.
 func (ec *EmailClient) MarkUIDAsProcessed(uid uint32) error {
 
 	ec.dataMu.Lock()
-	ec.processedUIDs[uid] = true
+	if uid > ec.lastProcessedUID {
+		ec.lastProcessedUID = uid
+	}
 	ec.dataMu.Unlock()
 
-	return saveProcessedUID(processedUIDsFile, uid)
+	return saveLastProcessedUID(processedUIDFile, ec.lastProcessedUID)
 }
 
 func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []uint32) ([]uint32, error) {
 
-	if _, err := os.Stat(processedUIDsFile); os.IsNotExist(err) {
-		file, err := os.Create(processedUIDsFile)
-		if err != nil {
-			return uids, fmt.Errorf("failed to create processed UIDs file: %w", err)
-		}
-		defer file.Close()
-		ec.dataMu.Lock()
-		defer ec.dataMu.Unlock()
-		for _, uid := range uids {
-			if _, err := file.WriteString(fmt.Sprintf("%d\n", uid)); err != nil {
-				return uids, fmt.Errorf("failed to write UID %d to file: %w", uid, err)
+	if _, err := os.Stat(processedUIDFile); os.IsNotExist(err) && len(uids) > 0 {
+		maxUID := uids[0]
+		for _, u := range uids {
+			if u > maxUID {
+				maxUID = u
 			}
-			ec.processedUIDs[uid] = true
 		}
-		log.Printf("Created %s and wrote %d UIDs", processedUIDsFile, len(uids))
-		uids = nil
-	}
+		err := saveLastProcessedUID(processedUIDFile, maxUID)
 
+		if err != nil {
+			return uids, fmt.Errorf("failed to save initial max UID: %w", err)
+		}
+		ec.dataMu.Lock()
+		ec.lastProcessedUID = maxUID
+		ec.dataMu.Unlock()
+		log.Printf("Saved initial last UID %d to %s", maxUID, processedUIDFile)
+
+		return nil, nil
+	}
 	return uids, nil
 }
 
@@ -401,13 +375,14 @@ func (ec *EmailClient) startIdle(onUpdate func()) error {
 }
 
 func (ec *EmailClient) RunWithIdleAndTickerCallback(intervalSec int, shutdownChan <-chan struct{}, callback func()) error {
+
 	var mu sync.Mutex
 	isProcessing := false
 	processNewEmailsSafe := func() {
 		mu.Lock()
 		if isProcessing {
 			mu.Unlock()
-			return // уже идёт обработка, пропускаем
+			return
 		}
 		isProcessing = true
 		mu.Unlock()
