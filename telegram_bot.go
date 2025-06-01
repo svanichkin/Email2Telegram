@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,7 +107,7 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	// Header + text, then split
 
 	var messages []string
-	text := "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n" + data.TextBody
+	text := "<b>" + data.Subject + "</b>\n#" + strconv.Itoa(int(data.Uid)) + "\n\n<b>" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n" + data.TextBody
 	messages = splitHTML(text)
 
 	// Send messages

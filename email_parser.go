@@ -16,6 +16,7 @@ import (
 
 // ParsedEmailData holds extracted information from an email
 type ParsedEmailData struct {
+	Uid         uint32
 	From        string
 	To          string
 	Subject     string
@@ -23,7 +24,7 @@ type ParsedEmailData struct {
 	Attachments map[string][]byte
 }
 
-func ParseEmail(raw []byte) (*ParsedEmailData, error) {
+func ParseEmail(raw []byte, uid uint32) (*ParsedEmailData, error) {
 
 	// Eml reader
 
@@ -35,6 +36,7 @@ func ParseEmail(raw []byte) (*ParsedEmailData, error) {
 	// Compile fields
 
 	data := &ParsedEmailData{
+		Uid:         uid,
 		Subject:     env.GetHeader("Subject"),
 		TextBody:    env.Text,
 		Attachments: make(map[string][]byte),

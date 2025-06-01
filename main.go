@@ -26,7 +26,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to init Telegram bot: %v", err)
 	}
-	telegramBot.StartListener()
+	go telegramBot.StartListener()
 
 	// Password from uzer or keychain
 
@@ -49,9 +49,7 @@ func main() {
 
 	// Mail init
 
-	emailClient, err := NewEmailClient(
-		cfg.EmailHost, cfg.EmailPort, cfg.EmailUsername, emailPassword,
-	)
+	emailClient, err := NewEmailClient(cfg.EmailHost, cfg.EmailPort, cfg.EmailUsername, emailPassword)
 	if err != nil {
 		log.Fatalf("Failed to init email client: %v", err)
 	}
@@ -105,7 +103,7 @@ func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot) {
 			log.Printf("Error fetching email %d: %v", uid, err)
 			continue
 		}
-		parsedData, err := ParseEmail(bytes)
+		parsedData, err := ParseEmail(bytes, uid)
 		if err != nil {
 			log.Printf("Error parsing email %d: %v", uid, err)
 			continue

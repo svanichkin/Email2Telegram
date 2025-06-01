@@ -141,34 +141,106 @@ func (ec *EmailClient) Close() {
 // ListNewMailUIDs fetches all UIDs from INBOX and filters out processed ones.
 func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
 
+	const timeoutSelect = 0 * time.Second
+
 	if err := ec.reconnectIfNeeded(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("initial reconnect failed: %w", err)
 	}
 
-	_, err := ec.client.Select("INBOX", false)
+	mbox, err := ec.selectInboxWithTimeout(timeoutSelect)
 	if err != nil {
-		return nil, fmt.Errorf("failed to select INBOX: %w", err)
+		log.Printf("SELECT INBOX failed (%v), attempting reconnect and retry", err)
+
+		if reconErr := ec.reconnectIfNeeded(); reconErr != nil {
+			return nil, fmt.Errorf("reconnect failed after select inbox error: %v (initial select error: %w)", reconErr, err)
+		}
+
+		// повтор, после переподключения
+		mbox, err = ec.selectInboxWithTimeout(timeoutSelect)
+		if err != nil {
+			return nil, fmt.Errorf("select inbox failed again after reconnect: %w", err)
+		}
 	}
-	log.Println("Selected INBOX")
+	log.Printf("INBOX selected, mailbox has %d messages", mbox.Messages)
+
+	// затем поиск новых UID
 	criteria := imap.NewSearchCriteria()
 	criteria.WithoutFlags = []string{imap.DeletedFlag}
-	allUIDs, err := ec.client.UidSearch(criteria)
+
+	newUIDs, err := ec.uidSearchWithTimeout(criteria, timeoutSelect)
 	if err != nil {
-		return nil, fmt.Errorf("failed to search for UIDs: %w", err)
+		log.Printf("UID search failed (%v), attempting reconnect and retry", err)
+
+		// переподключение и повтор
+		if reconErr := ec.reconnectIfNeeded(); reconErr != nil {
+			return nil, fmt.Errorf("reconnect failed after search error: %v (initial search error: %w)", reconErr, err)
+		}
+
+		// Повтор SEARCH после переподключения
+		newUIDs, err = ec.uidSearchWithTimeout(criteria, timeoutSelect)
+		if err != nil {
+			return nil, fmt.Errorf("UID search failed again after reconnect: %w", err)
+		}
 	}
-	log.Printf("Found %d UIDs in INBOX", len(allUIDs))
+
+	log.Printf("Found total %d UIDs in INBOX", len(newUIDs))
 
 	ec.dataMu.Lock()
 	defer ec.dataMu.Unlock()
-	var newUIDs []uint32
-	for _, uid := range allUIDs {
+
+	var unprocessedUIDs []uint32
+	for _, uid := range newUIDs {
 		if !ec.processedUIDs[uid] {
-			newUIDs = append(newUIDs, uid)
+			unprocessedUIDs = append(unprocessedUIDs, uid)
 		}
 	}
-	log.Printf("Found %d new UIDs", len(newUIDs))
 
-	return newUIDs, nil
+	log.Printf("Found %d new unprocessed UIDs", len(unprocessedUIDs))
+	return unprocessedUIDs, nil
+}
+
+func (ec *EmailClient) selectInboxWithTimeout(timeout time.Duration) (*imap.MailboxStatus, error) {
+	resultChan := make(chan struct {
+		mbox *imap.MailboxStatus
+		err  error
+	}, 1)
+
+	go func() {
+		mbox, err := ec.client.Select("INBOX", false)
+		resultChan <- struct {
+			mbox *imap.MailboxStatus
+			err  error
+		}{mbox, err}
+	}()
+
+	select {
+	case res := <-resultChan:
+		return res.mbox, res.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout reached in selectInboxWithTimeout after %v", timeout)
+	}
+}
+
+func (ec *EmailClient) uidSearchWithTimeout(criteria *imap.SearchCriteria, timeout time.Duration) ([]uint32, error) {
+	resultChan := make(chan struct {
+		uids []uint32
+		err  error
+	}, 1)
+
+	go func() {
+		uids, err := ec.client.UidSearch(criteria)
+		resultChan <- struct {
+			uids []uint32
+			err  error
+		}{uids, err}
+	}()
+
+	select {
+	case res := <-resultChan:
+		return res.uids, res.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout occurred during UID SEARCH after %v", timeout)
+	}
 }
 
 // FetchMail fetches the content of a specific email by UID.
@@ -260,128 +332,173 @@ func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []uint32) ([]uint32, error) {
 }
 
 func (ec *EmailClient) startIdle(onUpdate func()) error {
-	if ec.client == nil {
-		return fmt.Errorf("IMAP client is not connected")
+	// Проверка подключения, при необходимости переподключаемся
+	if err := ec.reconnectIfNeeded(); err != nil {
+		return fmt.Errorf("cannot connect via IMAP for IDLE: %w", err)
 	}
+
+	// Выбираем INBOX папку
 	_, err := ec.client.Select("INBOX", false)
 	if err != nil {
 		return fmt.Errorf("failed to select INBOX: %w", err)
 	}
-	idleClient := idle.NewClient(ec.client)
+	log.Println("[IDLE] INBOX selected, ready to enter IDLE mode.")
 
+	idleClient := idle.NewClient(ec.client)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
 
-	// ДОБАВЛЯЕМ КАНАЛ ДЛЯ ОБНОВЛЕНИЙ
-	updates := make(chan client.Update, 10)
+	// Канал для обновлений от IMAP-сервера
+	updates := make(chan client.Update)
 	ec.client.Updates = updates
 
+	// Запускаем IDLE режим
 	go func(stopCh chan struct{}) {
-		log.Println("Entering IDLE mode")
+		log.Println("[IDLE] Entering IMAP IDLE mode; waiting for updates from server.")
 		done <- idleClient.Idle(stopCh)
 	}(stop)
 
+	// Обработка событий и перезапуск IDLE
 	go func() {
 		for {
 			select {
+
+			// Получение обновлений от IMAP-сервера
 			case update := <-updates:
-				log.Println("Got IMAP update:", update)
+				log.Printf("[IDLE] Received IMAP update: %v", update)
 				if onUpdate != nil {
 					onUpdate()
 				}
+
+			// Завершение IDLE режима с ошибкой или без
 			case err := <-done:
 				if err != nil {
-					log.Println("IDLE error:", err)
+					log.Printf("[IDLE] Error received during IDLE mode: %v", err)
+				} else {
+					log.Println("[IDLE] IDLE mode ended normally without error.")
 				}
 				return
-			case <-time.After(29 * time.Minute):
-				log.Println("Restarting IDLE to avoid timeout")
+
+			// Таймаут: перезапуск IDLE режима во избежание разрыва соединения
+			case <-time.After(15 * time.Minute):
+				log.Println("[IDLE] Restarting IDLE mode to prevent timeout.")
 				close(stop)
+
+				// Подождём секунду для корректного завершения текущего IDLE
 				time.Sleep(time.Second)
+
+				// Запускаем новый IDLE режим
 				stop = make(chan struct{})
 				go func(stopCh chan struct{}) {
-					log.Println("Re-entering IDLE mode")
+					log.Println("[IDLE] Re-entering IMAP IDLE mode; waiting again for updates.")
 					done <- idleClient.Idle(stopCh)
 				}(stop)
 			}
 		}
 	}()
+
 	return nil
 }
 
 func (ec *EmailClient) RunWithIdleAndTickerCallback(intervalSec int, shutdownChan <-chan struct{}, callback func()) error {
-    var mu sync.Mutex
-    isProcessing := false
-    processNewEmailsSafe := func() {
-        mu.Lock()
-        if isProcessing {
-            mu.Unlock()
-            return // уже идёт обработка, пропускаем
-        }
-        isProcessing = true
-        mu.Unlock()
+	var mu sync.Mutex
+	isProcessing := false
+	processNewEmailsSafe := func() {
+		mu.Lock()
+		if isProcessing {
+			mu.Unlock()
+			return // уже идёт обработка, пропускаем
+		}
+		isProcessing = true
+		mu.Unlock()
 
-        defer func() {
-            mu.Lock()
-            isProcessing = false
-            mu.Unlock()
-        }()
+		defer func() {
+			mu.Lock()
+			isProcessing = false
+			mu.Unlock()
+		}()
 
-        callback()
-    }
+		callback()
+	}
 
-    // Тикер    
-    go func() {
-        ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
-        defer ticker.Stop()
-        for {
-            select {
-            case <-ticker.C:
-                log.Println("[Ticker] Triggered email check")
-                processNewEmailsSafe()
-            case <-shutdownChan:
-                log.Println("Ticker goroutine shutting down")
-                return
-            }
-        }
-    }()
+	// Тикер
+	go func() {
+		ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				log.Println("[Ticker] Triggered email check")
+				processNewEmailsSafe()
+			case <-shutdownChan:
+				log.Println("Ticker goroutine shutting down")
+				return
+			}
+		}
+	}()
 
-    // IDLE + callback
-    err := ec.startIdle(func() {
-        log.Println("[IDLE] Triggered email check")
-        processNewEmailsSafe()
-    })
+	// IDLE + callback
+	err := ec.startIdle(func() {
+		log.Println("[IDLE] Triggered email check")
+		processNewEmailsSafe()
+	})
 
-    return err
+	return err
 }
 
+// reconnectIfNeeded повторяет попытки до победного подключения каждые 15 секунд
 func (ec *EmailClient) reconnectIfNeeded() error {
-
 	ec.connMu.Lock()
-	defer ec.connMu.Unlock()
+	connected := ec.client != nil && (ec.client.State() == imap.AuthenticatedState || ec.client.State() == imap.SelectedState)
+	ec.connMu.Unlock()
 
-	if ec.client != nil && (ec.client.State() == imap.AuthenticatedState || ec.client.State() == imap.SelectedState) {
+	if connected {
 		return nil
 	}
 
-	if ec.client != nil {
-		ec.client.Close()
+	return ec.reconnectWithRetries(0, 10*time.Second)
+}
+
+func (ec *EmailClient) reconnectWithRetries(maxAttempts int, initialDelay time.Duration) error {
+	var lastErr error
+	currentDelay := initialDelay
+	for attempt := 1; maxAttempts <= 0 || attempt <= maxAttempts; attempt++ {
+		ec.connMu.Lock()
+
+		if ec.client != nil {
+			ec.client.Close()
+			ec.client = nil
+		}
+
+		serverAddr := fmt.Sprintf("%s:%d", ec.host, ec.port)
+		log.Printf("Attempt [%d] reconnecting to IMAP server: %s", attempt, serverAddr)
+
+		c, err := client.DialTLS(serverAddr, nil)
+		if err == nil {
+			err = c.Login(ec.username, ec.password)
+			if err == nil {
+				ec.client = c
+				ec.connMu.Unlock()
+				log.Println("Successfully reconnected.")
+				return nil
+			}
+			c.Close()
+		}
+
+		lastErr = err
+		ec.connMu.Unlock()
+
+		log.Printf(
+			"Reconnect attempt [%d] failed: %v. Retrying in %v...",
+			attempt, err, currentDelay)
+
+		time.Sleep(currentDelay)
+
+		currentDelay *= 2
+		if currentDelay > 5*time.Minute {
+			currentDelay = 5 * time.Minute // макс. задержка
+		}
 	}
 
-	serverAddr := fmt.Sprintf("%s:%d", ec.host, ec.port)
-	log.Println("Reconnecting to IMAP server:", serverAddr)
-
-	c, err := client.DialTLS(serverAddr, nil)
-	if err != nil {
-		return fmt.Errorf("reconnect dial error: %w", err)
-	}
-
-	if err := c.Login(ec.username, ec.password); err != nil {
-		c.Close()
-		return fmt.Errorf("reconnect login error: %w", err)
-	}
-
-	ec.client = c
-
-	return nil
+	return fmt.Errorf("unable to reconnect after %d attempts: %w", maxAttempts, lastErr)
 }
