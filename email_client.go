@@ -213,3 +213,24 @@ func (ec *EmailClient) MarkUIDAsProcessed(uid uint32) error {
 	log.Printf("Marked UID %d as processed.", uid)
 	return nil
 }
+
+func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []uint32) ([]uint32, error) {
+	if _, err := os.Stat(processedUIDsFile); os.IsNotExist(err) {
+		file, err := os.Create(processedUIDsFile)
+		if err != nil {
+			return uids, fmt.Errorf("failed to create processed UIDs file: %w", err)
+		}
+		defer file.Close()
+
+		for _, uid := range uids {
+			if _, err := file.WriteString(fmt.Sprintf("%d\n", uid)); err != nil {
+				return uids, fmt.Errorf("failed to write UID %d to file: %w", uid, err)
+			}
+			ec.processedUIDs[uid] = true
+		}
+		log.Printf("Created %s and wrote %d UIDs", processedUIDsFile, len(uids))
+	} else {
+		log.Printf("File %s exists, ничего не добавляем", processedUIDsFile)
+	}
+	return nil, nil
+}

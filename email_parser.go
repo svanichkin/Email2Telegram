@@ -54,11 +54,33 @@ func ParseEmail(raw []byte) (*ParsedEmailData, error) {
 
 	// Attachments
 
-	for _, att := range env.Attachments {
+	for _, att := range findAllAttachments(env) {
 		data.Attachments[att.FileName] = att.Content
 	}
 
 	return data, nil
+}
+
+func findAllAttachments(env *enmime.Envelope) []*enmime.Part {
+	var attachments []*enmime.Part
+
+	var walk func(part *enmime.Part)
+	walk = func(part *enmime.Part) {
+		if part == nil {
+			return
+		}
+
+		if part.FileName != "" && len(part.Content) > 0 {
+			attachments = append(attachments, part)
+		}
+
+		for child := part.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+
+	walk(env.Root)
+	return attachments
 }
 
 func CleanTelegramHTML(raw string) string {
