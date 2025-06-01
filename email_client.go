@@ -10,8 +10,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/emersion/go-imap"
+	idle "github.com/emersion/go-imap-idle"
 	"github.com/emersion/go-imap/client"
 )
 
@@ -19,6 +22,7 @@ const processedUIDsFile = "processed_uids.txt"
 
 // loadProcessedUIDs reads UIDs from the given file.
 func loadProcessedUIDs(filePath string) (map[uint32]bool, error) {
+
 	uids := make(map[uint32]bool)
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -47,11 +51,13 @@ func loadProcessedUIDs(filePath string) (map[uint32]bool, error) {
 		return nil, fmt.Errorf("error reading processed UIDs file: %w", err)
 	}
 	log.Printf("Loaded %d processed UIDs from %s", len(uids), filePath)
+
 	return uids, nil
 }
 
 // saveProcessedUID appends the given UID to the file.
 func saveProcessedUID(filePath string, uid uint32) error {
+
 	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open processed UIDs file for writing: %w", err)
@@ -62,45 +68,61 @@ func saveProcessedUID(filePath string, uid uint32) error {
 		return fmt.Errorf("failed to write UID to processed UIDs file: %w", err)
 	}
 	log.Printf("Saved UID %d to %s", uid, filePath)
+
 	return nil
 }
 
 // EmailClient holds the IMAP client connection and processed UIDs
 type EmailClient struct {
-	client        *client.Client
+	client *client.Client
+
 	processedUIDs map[uint32]bool
+	dataMu        sync.Mutex
+
+	host     string
+	port     int
+	username string
+	password string
+
+	connMu sync.Mutex
 }
 
 // NewEmailClient connects to the IMAP server and returns an EmailClient
 func NewEmailClient(host string, port int, username string, password string) (*EmailClient, error) {
-	serverAddr := fmt.Sprintf("%s:%d", host, port)
 
+	serverAddr := fmt.Sprintf("%s:%d", host, port)
 	log.Println("Connecting to IMAP server:", serverAddr)
+
 	c, err := client.DialTLS(serverAddr, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to IMAP server: %w", err)
 	}
-	log.Println("Connected to IMAP server")
 
-	log.Println("Logging in with username:", username)
 	if err := c.Login(username, password); err != nil {
-		c.Close() // Ensure connection is closed on login failure
+		c.Close()
 		return nil, fmt.Errorf("failed to login: %w", err)
 	}
-	log.Println("Logged in successfully")
 
 	uids, err := loadProcessedUIDs(processedUIDsFile)
 	if err != nil {
-		c.Logout() // Logout if we can't load UIDs
-		c.Close()  // Ensure connection is closed
+		c.Logout()
 		return nil, fmt.Errorf("failed to load processed UIDs: %w", err)
 	}
 
-	return &EmailClient{client: c, processedUIDs: uids}, nil
+	return &EmailClient{
+		client:        c,
+		processedUIDs: uids,
+		host:          host,
+		port:          port,
+		username:      username,
+		password:      password,
+	}, nil
+
 }
 
 // Close logs out the client
 func (ec *EmailClient) Close() {
+
 	if ec.client != nil {
 		log.Println("Logging out...")
 		err := ec.client.Logout()
@@ -113,12 +135,14 @@ func (ec *EmailClient) Close() {
 		// but an explicit Close call can be added if specific client library versions require it.
 		// For emersion/go-imap, Logout generally handles this.
 	}
+
 }
 
 // ListNewMailUIDs fetches all UIDs from INBOX and filters out processed ones.
 func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
-	if ec.client == nil {
-		return nil, fmt.Errorf("IMAP client is not connected")
+
+	if err := ec.reconnectIfNeeded(); err != nil {
+		return nil, err
 	}
 
 	_, err := ec.client.Select("INBOX", false)
@@ -126,15 +150,16 @@ func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
 		return nil, fmt.Errorf("failed to select INBOX: %w", err)
 	}
 	log.Println("Selected INBOX")
-
 	criteria := imap.NewSearchCriteria()
-	criteria.WithoutFlags = []string{imap.DeletedFlag} // Optionally filter out already deleted messages
+	criteria.WithoutFlags = []string{imap.DeletedFlag}
 	allUIDs, err := ec.client.UidSearch(criteria)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search for UIDs: %w", err)
 	}
 	log.Printf("Found %d UIDs in INBOX", len(allUIDs))
 
+	ec.dataMu.Lock()
+	defer ec.dataMu.Unlock()
 	var newUIDs []uint32
 	for _, uid := range allUIDs {
 		if !ec.processedUIDs[uid] {
@@ -142,13 +167,15 @@ func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
 		}
 	}
 	log.Printf("Found %d new UIDs", len(newUIDs))
+
 	return newUIDs, nil
 }
 
 // FetchMail fetches the content of a specific email by UID.
 func (ec *EmailClient) FetchMail(uid uint32) (*mail.Message, []byte, error) {
-	if ec.client == nil {
-		return nil, nil, fmt.Errorf("IMAP client is not connected")
+
+	if err := ec.reconnectIfNeeded(); err != nil {
+		return nil, nil, err
 	}
 
 	if ec.client.Mailbox() == nil || ec.client.Mailbox().Name != "INBOX" {
@@ -158,10 +185,8 @@ func (ec *EmailClient) FetchMail(uid uint32) (*mail.Message, []byte, error) {
 			return nil, nil, fmt.Errorf("failed to select INBOX for fetch: %w", err)
 		}
 	}
-
 	seqset := new(imap.SeqSet)
 	seqset.AddNum(uid)
-
 	section := &imap.BodySectionName{}
 	items := []imap.FetchItem{
 		imap.FetchEnvelope,
@@ -170,27 +195,29 @@ func (ec *EmailClient) FetchMail(uid uint32) (*mail.Message, []byte, error) {
 		imap.FetchRFC822Size,
 		section.FetchItem(),
 	}
-
 	messages := make(chan *imap.Message, 1)
 	if err := ec.client.UidFetch(seqset, items, messages); err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch email with UID %d: %w", uid, err)
 	}
 
-	msg := <-messages
+	var msg *imap.Message
+	select {
+	case msg = <-messages:
+		// ок
+	case <-time.After(5 * time.Second):
+		return nil, nil, fmt.Errorf("timeout waiting for message UID %d", uid)
+	}
 	if msg == nil {
 		return nil, nil, fmt.Errorf("no message found for UID %d", uid)
 	}
-
 	bodyReader := msg.GetBody(section)
 	if bodyReader == nil {
 		return nil, nil, fmt.Errorf("could not find body for message UID %d", uid)
 	}
-
 	data, err := io.ReadAll(bodyReader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read body for UID %d: %w", uid, err)
 	}
-
 	parsedMail, err := mail.ReadMessage(bytes.NewReader(data))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse email for UID %d: %w", uid, err)
@@ -201,27 +228,24 @@ func (ec *EmailClient) FetchMail(uid uint32) (*mail.Message, []byte, error) {
 
 // MarkUIDAsProcessed adds the UID to the in-memory map and saves it to the file.
 func (ec *EmailClient) MarkUIDAsProcessed(uid uint32) error {
+
+	ec.dataMu.Lock()
 	ec.processedUIDs[uid] = true
-	if err := saveProcessedUID(processedUIDsFile, uid); err != nil {
-		// If saving fails, we should ideally have a strategy:
-		// - Remove from in-memory map to retry later?
-		// - Log and continue, risking reprocessing if app restarts before next save?
-		// For now, just log the error and return it.
-		log.Printf("Failed to save UID %d as processed to file: %v", uid, err)
-		return fmt.Errorf("failed to mark UID %d as processed in file: %w", uid, err)
-	}
-	log.Printf("Marked UID %d as processed.", uid)
-	return nil
+	ec.dataMu.Unlock()
+
+	return saveProcessedUID(processedUIDsFile, uid)
 }
 
 func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []uint32) ([]uint32, error) {
+
 	if _, err := os.Stat(processedUIDsFile); os.IsNotExist(err) {
 		file, err := os.Create(processedUIDsFile)
 		if err != nil {
 			return uids, fmt.Errorf("failed to create processed UIDs file: %w", err)
 		}
 		defer file.Close()
-
+		ec.dataMu.Lock()
+		defer ec.dataMu.Unlock()
 		for _, uid := range uids {
 			if _, err := file.WriteString(fmt.Sprintf("%d\n", uid)); err != nil {
 				return uids, fmt.Errorf("failed to write UID %d to file: %w", uid, err)
@@ -229,8 +253,135 @@ func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []uint32) ([]uint32, error) {
 			ec.processedUIDs[uid] = true
 		}
 		log.Printf("Created %s and wrote %d UIDs", processedUIDsFile, len(uids))
-	} else {
-		log.Printf("File %s exists, ничего не добавляем", processedUIDsFile)
+		uids = nil
 	}
-	return nil, nil
+
+	return uids, nil
+}
+
+func (ec *EmailClient) startIdle(onUpdate func()) error {
+	if ec.client == nil {
+		return fmt.Errorf("IMAP client is not connected")
+	}
+	_, err := ec.client.Select("INBOX", false)
+	if err != nil {
+		return fmt.Errorf("failed to select INBOX: %w", err)
+	}
+	idleClient := idle.NewClient(ec.client)
+
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+
+	// ДОБАВЛЯЕМ КАНАЛ ДЛЯ ОБНОВЛЕНИЙ
+	updates := make(chan client.Update, 10)
+	ec.client.Updates = updates
+
+	go func(stopCh chan struct{}) {
+		log.Println("Entering IDLE mode")
+		done <- idleClient.Idle(stopCh)
+	}(stop)
+
+	go func() {
+		for {
+			select {
+			case update := <-updates:
+				log.Println("Got IMAP update:", update)
+				if onUpdate != nil {
+					onUpdate()
+				}
+			case err := <-done:
+				if err != nil {
+					log.Println("IDLE error:", err)
+				}
+				return
+			case <-time.After(29 * time.Minute):
+				log.Println("Restarting IDLE to avoid timeout")
+				close(stop)
+				time.Sleep(time.Second)
+				stop = make(chan struct{})
+				go func(stopCh chan struct{}) {
+					log.Println("Re-entering IDLE mode")
+					done <- idleClient.Idle(stopCh)
+				}(stop)
+			}
+		}
+	}()
+	return nil
+}
+
+func (ec *EmailClient) RunWithIdleAndTickerCallback(intervalSec int, shutdownChan <-chan struct{}, callback func()) error {
+    var mu sync.Mutex
+    isProcessing := false
+    processNewEmailsSafe := func() {
+        mu.Lock()
+        if isProcessing {
+            mu.Unlock()
+            return // уже идёт обработка, пропускаем
+        }
+        isProcessing = true
+        mu.Unlock()
+
+        defer func() {
+            mu.Lock()
+            isProcessing = false
+            mu.Unlock()
+        }()
+
+        callback()
+    }
+
+    // Тикер    
+    go func() {
+        ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
+        defer ticker.Stop()
+        for {
+            select {
+            case <-ticker.C:
+                log.Println("[Ticker] Triggered email check")
+                processNewEmailsSafe()
+            case <-shutdownChan:
+                log.Println("Ticker goroutine shutting down")
+                return
+            }
+        }
+    }()
+
+    // IDLE + callback
+    err := ec.startIdle(func() {
+        log.Println("[IDLE] Triggered email check")
+        processNewEmailsSafe()
+    })
+
+    return err
+}
+
+func (ec *EmailClient) reconnectIfNeeded() error {
+
+	ec.connMu.Lock()
+	defer ec.connMu.Unlock()
+
+	if ec.client != nil && (ec.client.State() == imap.AuthenticatedState || ec.client.State() == imap.SelectedState) {
+		return nil
+	}
+
+	if ec.client != nil {
+		ec.client.Close()
+	}
+
+	serverAddr := fmt.Sprintf("%s:%d", ec.host, ec.port)
+	log.Println("Reconnecting to IMAP server:", serverAddr)
+
+	c, err := client.DialTLS(serverAddr, nil)
+	if err != nil {
+		return fmt.Errorf("reconnect dial error: %w", err)
+	}
+
+	if err := c.Login(ec.username, ec.password); err != nil {
+		c.Close()
+		return fmt.Errorf("reconnect login error: %w", err)
+	}
+
+	ec.client = c
+
+	return nil
 }

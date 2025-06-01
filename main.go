@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/zalando/go-keyring"
 )
@@ -27,6 +26,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to init Telegram bot: %v", err)
 	}
+	telegramBot.StartListener()
 
 	// Password from uzer or keychain
 
@@ -57,41 +57,28 @@ func main() {
 	}
 	defer emailClient.Close()
 
-	// graceful shutdown
+	// Graceful shutdown
 
-	shutdownChan := make(chan os.Signal, 1)
-	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
-
-	// Noop IMAP ping
+	shutdownChan := make(chan struct{})
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		t := time.NewTicker(5 * time.Minute)
-		defer t.Stop()
-		for range t.C {
-			if emailClient != nil && emailClient.client != nil {
-				log.Println("Sending NOOP to keep IMAP connection alive")
-				if err := emailClient.client.Noop(); err != nil {
-					log.Printf("NOOP failed: %v", err)
-				}
-			}
+		checkerFunc := func() {
+			processNewEmails(emailClient, telegramBot)
+		}
+		err := emailClient.RunWithIdleAndTickerCallback(cfg.CheckIntervalSeconds, shutdownChan, checkerFunc)
+		if err != nil {
+			log.Fatalf("Email client error: %v", err)
 		}
 	}()
 
-	// Main cycle
+	// Waiting signal OS
 
-	ticker := time.NewTicker(time.Duration(cfg.CheckIntervalSeconds) * time.Second)
-	defer ticker.Stop()
+	<-signalChan
+	log.Println("Shutdown signal received")
 
-	for {
-		select {
-		case <-ticker.C:
-			processNewEmails(emailClient, telegramBot)
-		case <-shutdownChan:
-			log.Println("Shutting down...")
-			return
-		}
-	}
-
+	close(shutdownChan)
 }
 
 func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot) {

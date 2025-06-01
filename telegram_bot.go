@@ -27,6 +27,16 @@ func NewTelegramBot(apiToken string, allowedUserID int64) (*TelegramBot, error) 
 	return &TelegramBot{api: bot, allowedUserID: allowedUserID}, nil
 }
 
+func (t *TelegramBot) StartListener() {
+	updates := t.api.GetUpdatesChan(tgbotapi.UpdateConfig{
+		Timeout: 60,
+	})
+
+	for update := range updates {
+		t.handleUpdate(update)
+	}
+}
+
 func (tb *TelegramBot) RequestPassword(prompt string) (string, error) {
 
 	// Send message for user
@@ -93,9 +103,13 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 
 	var cumulativeError error
 
+	// Header + text, then split
+
 	var messages []string
 	text := "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n" + data.TextBody
 	messages = splitHTML(text)
+
+	// Send messages
 
 	log.Printf("Attempting to send main email message (Subject: %s) to chat ID %d", data.Subject, tb.allowedUserID)
 	for i := range len(messages) {
@@ -112,7 +126,8 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 		}
 	}
 
-	// 3. Other Attachments
+	// Other Attachments
+
 	if len(data.Attachments) > 0 {
 		log.Printf("Attempting to send %d other attachments to chat ID %d", len(data.Attachments), tb.allowedUserID)
 		for filename, contentBytes := range data.Attachments {
@@ -128,7 +143,7 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 				if cumulativeError == nil {
 					cumulativeError = fmt.Errorf("failed to send attachment %s: %w", filename, err)
 				} else {
-					cumulativeError = fmt.Errorf("%v; failed to send attachment %s: %w", cumulativeError, err)
+					cumulativeError = fmt.Errorf("%v; failed to send attachment %s: %w", cumulativeError, filename, err)
 				}
 			}
 		}
@@ -137,39 +152,53 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	return cumulativeError
 }
 
+// Magic HTML splitter
+
 func splitHTML(text string) []string {
 
 	var blocks []string
 	for len(text) > 0 {
+
+		// If text length small - no need split
+
 		if len(text) < maxLen {
 			blocks = append(blocks, text)
 			break
 		}
+
+		// Cut text
+
 		cut := cutTextBeforePos(text, maxLen)
+
+		//  Find best cut point
+
 		cut, pos, open := findCutPoint(cut)
-		if cut == "" {
-			blocks = append(blocks, cutTextBeforePos(text, maxLen))
-			text = cutTextAfterPos(text, maxLen)
-		} else {
-			blocks = append(blocks, cut)
-			text = open + cutTextAfterPos(text, pos)
-		}
+
+		// Add completed message block
+
+		blocks = append(blocks, cut)
+
+		// Open closed tag, if needed and cut text
+
+		text = open + cutTextAfterPos(text, pos)
 	}
 
 	return blocks
 }
 
-// Get text maxLen, then find cut point
 func findCutPoint(cut string) (string, int, string) {
 
+	// Find last cut point with tag
+
 	positions := []int{
-		findLastTagPosition(cut, "</a>", "\n"),
-		findLastTagPosition(cut, "</b>", ""),
-		findLastTagPosition(cut, "</code>", ""),
-		findLastTagPosition(cut, "</i>", ""),
-		findLastTagPosition(cut, "</pre>", ""),
-		findLastTagPosition(cut, "</s>", ""),
-		findLastTagPosition(cut, "</u>", ""),
+		findLastTagRightPosition(cut, "</a>", "\n"),
+		findLastTagRightPosition(cut, "</b>", ""),
+		findLastTagRightPosition(cut, "</code>", ""),
+		findLastTagRightPosition(cut, "</i>", ""),
+		findLastTagRightPosition(cut, "</pre>", ""),
+		findLastTagRightPosition(cut, "</s>", ""),
+		findLastTagRightPosition(cut, "</u>", ""),
+		findLastTagRightPosition(cut, "\n", ""),
 	}
 	maxPos := -1
 	for _, pos := range positions {
@@ -177,15 +206,32 @@ func findCutPoint(cut string) (string, int, string) {
 			maxPos = pos
 		}
 	}
-	nPos := findLastTagPosition(cut, "\n", "")
-	if nPos == -1 {
-		nPos = findLastPrefixLeftPosition(cut, "<a href=")
+
+	// if notfound, cut with bad point
+
+	if maxPos == -1 {
+		maxPos = findLastTagLeftPosition(cut, "<a href=")
 	}
-	if maxPos < nPos {
-		maxPos = nPos
+	if maxPos == -1 {
+		maxPos = findLastTagRightPosition(cut, ". ", "")
 	}
+	if maxPos == -1 {
+		maxPos = findLastTagRightPosition(cut, ", ", "")
+	}
+
+	// if not found, cut with length
+
+	if maxPos == -1 {
+		maxPos = len(cut)
+	}
+
+	// Cut text
+
 	cut = cutTextBeforePos(cut, maxPos)
-	open, close := findEnclosingTags(cut, nPos)
+
+	// Check for Close tag and close if needed
+
+	open, close := findEnclosingTags(cut, maxPos)
 	if len(close) > 0 {
 		cut = cut + close
 	}
@@ -217,11 +263,14 @@ func cutTextAfterPos(text string, pos int) string {
 	return text[pos:]
 }
 
-func findLastTagPosition(text, prefix, postfix string) int {
+func findLastTagRightPosition(text, prefix, postfix string) int {
 
 	lastPos := -1
 	offset := 0
 	for {
+
+		// Main work
+
 		idx := strings.Index(text[offset:], prefix)
 		if idx == -1 {
 			break
@@ -229,23 +278,27 @@ func findLastTagPosition(text, prefix, postfix string) int {
 		absoluteIdx := offset + idx
 		pos := absoluteIdx + len(prefix)
 
+		// Postfix work
+
 		hasPostfix := false
 		if postfix == "" {
 			hasPostfix = true
 		} else if pos <= len(text)-len(postfix) && strings.HasPrefix(text[pos:], postfix) {
 			hasPostfix = true
 		}
-
 		if hasPostfix {
 			lastPos = pos
 		}
+
+		// New offset
+
 		offset = absoluteIdx + 1
 	}
 
 	return lastPos
 }
 
-func findLastPrefixLeftPosition(text, prefix string) int {
+func findLastTagLeftPosition(text, prefix string) int {
 
 	lastPos := -1
 	offset := 0
@@ -256,7 +309,7 @@ func findLastPrefixLeftPosition(text, prefix string) int {
 		}
 		absoluteIdx := offset + idx
 		lastPos = absoluteIdx
-		offset = absoluteIdx + 1 // ищем все вхождения, даже перекрывающиеся
+		offset = absoluteIdx + 1
 	}
 
 	return lastPos
@@ -270,7 +323,9 @@ func findEnclosingTags(text string, pos int) (string, string) {
 	i := pos - 1
 	for i >= 0 {
 		if text[i] == '<' {
-			// search start tag
+
+			// Search start tag
+
 			end := i + 1
 			for end < len(text) && text[end] != '>' {
 				end++
@@ -284,7 +339,9 @@ func findEnclosingTags(text string, pos int) (string, string) {
 				break
 			}
 			tagName := tagParts[0]
-			// if closed tag - skip
+
+			// If closed tag - skip
+
 			if strings.HasPrefix(tagName, "/") {
 				return "", ""
 			}
@@ -297,4 +354,37 @@ func findEnclosingTags(text string, pos int) (string, string) {
 	}
 
 	return "", ""
+}
+
+func (t *TelegramBot) handleUpdate(update tgbotapi.Update) {
+
+	// Non messages update
+
+	if update.Message == nil {
+		return
+	}
+
+	// AllowedUserID
+
+	if update.Message.From.ID != t.allowedUserID {
+		return
+	}
+
+	// Reply message
+
+	if update.Message.ReplyToMessage != nil {
+		repliedText := update.Message.ReplyToMessage.Text
+		userText := update.Message.Text
+		chatID := update.Message.Chat.ID
+		response := fmt.Sprintf("Вы ответили на сообщение: %q\nВаш ответ: %q", repliedText, userText)
+		msg := tgbotapi.NewMessage(chatID, response)
+		t.api.Send(msg)
+
+		log.Printf("Reply message received: %s", update.Message.Text)
+		// Тут обрабатывай reply
+	} else {
+		log.Printf("New message: %s", update.Message.Text)
+		// Обычная обработка
+	}
+
 }
