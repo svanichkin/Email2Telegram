@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/svanichkin/TelegramHTML"
 )
 
 type TelegramBot struct {
@@ -110,14 +111,14 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	// Header + text, then split
 
 	var messages []string
-	text := "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n" + data.TextBody
-	messages = splitHTML(text)
+	text := "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n<a href=\"https://t.me/email_redirect_bot?start=msg12345\">Открыть сообщение</a>\n\n" + data.TextBody
+	messages = telehtml.SplitTelegramHTML(text)
 
 	// Send messages
 
 	log.Printf("Attempting to send main email message (Subject: %s) to chat ID %d", data.Subject, tb.allowedUserID)
 	for i := range len(messages) {
-		msg := tgbotapi.NewMessage(tb.allowedUserID, messages[i]+encodeUidInvisible(data.Uid))
+		msg := tgbotapi.NewMessage(tb.allowedUserID, messages[i]+telehtml.EncodeIntInvisible(data.Uid))
 		msg.ParseMode = "HTML"
 		msg.DisableWebPagePreview = true
 		if _, err := tb.api.Send(msg); err != nil {
@@ -154,212 +155,6 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	}
 
 	return cumulativeError
-}
-
-// Magic HTML splitter
-
-const maxLen = 4000
-
-func splitHTML(text string) []string {
-
-	var blocks []string
-	for len(text) > 0 {
-
-		// If text length small - no need split
-
-		if len(text) < maxLen {
-			blocks = append(blocks, text)
-			break
-		}
-
-		// Cut text
-
-		cut := cutTextBeforePos(text, maxLen)
-
-		//  Find best cut point
-
-		cut, pos, open := findCutPoint(cut)
-
-		// Add completed message block
-
-		blocks = append(blocks, cut)
-
-		// Open closed tag, if needed and cut text
-
-		text = open + cutTextAfterPos(text, pos)
-	}
-
-	return blocks
-}
-
-func findCutPoint(cut string) (string, int, string) {
-
-	// Find last cut point with tag
-
-	positions := []int{
-		findLastTagRightPosition(cut, "</a>", "\n"),
-		findLastTagRightPosition(cut, "</b>", ""),
-		findLastTagRightPosition(cut, "</code>", ""),
-		findLastTagRightPosition(cut, "</i>", ""),
-		findLastTagRightPosition(cut, "</pre>", ""),
-		findLastTagRightPosition(cut, "</s>", ""),
-		findLastTagRightPosition(cut, "</u>", ""),
-		findLastTagRightPosition(cut, "\n", ""),
-	}
-	maxPos := -1
-	for _, pos := range positions {
-		if pos > maxPos {
-			maxPos = pos
-		}
-	}
-
-	// if notfound, cut with bad point
-
-	if maxPos == -1 {
-		maxPos = findLastTagLeftPosition(cut, "<a href=")
-	}
-	if maxPos == -1 {
-		maxPos = findLastTagRightPosition(cut, ". ", "")
-	}
-	if maxPos == -1 {
-		maxPos = findLastTagRightPosition(cut, ", ", "")
-	}
-
-	// if not found, cut with length
-
-	if maxPos == -1 {
-		maxPos = len(cut)
-	}
-
-	// Cut text
-
-	cut = cutTextBeforePos(cut, maxPos)
-
-	// Check for Close tag and close if needed
-
-	open, close := findEnclosingTags(cut, maxPos)
-	if len(close) > 0 {
-		cut = cut + close
-	}
-
-	return cut, maxPos, open
-}
-
-func cutTextBeforePos(text string, pos int) string {
-
-	if pos > len(text) {
-		pos = len(text)
-	}
-	if pos < 0 {
-		pos = 0
-	}
-
-	return text[:pos]
-}
-
-func cutTextAfterPos(text string, pos int) string {
-
-	if pos < 0 {
-		pos = 0
-	}
-	if pos > len(text) {
-		pos = len(text)
-	}
-
-	return text[pos:]
-}
-
-func findLastTagRightPosition(text, prefix, postfix string) int {
-
-	lastPos := -1
-	offset := 0
-	for {
-
-		// Main work
-
-		idx := strings.Index(text[offset:], prefix)
-		if idx == -1 {
-			break
-		}
-		absoluteIdx := offset + idx
-		pos := absoluteIdx + len(prefix)
-
-		// Postfix work
-
-		hasPostfix := false
-		if postfix == "" {
-			hasPostfix = true
-		} else if pos <= len(text)-len(postfix) && strings.HasPrefix(text[pos:], postfix) {
-			hasPostfix = true
-		}
-		if hasPostfix {
-			lastPos = pos
-		}
-
-		// New offset
-
-		offset = absoluteIdx + 1
-	}
-
-	return lastPos
-}
-
-func findLastTagLeftPosition(text, prefix string) int {
-
-	lastPos := -1
-	offset := 0
-	for {
-		idx := strings.Index(text[offset:], prefix)
-		if idx == -1 {
-			break
-		}
-		absoluteIdx := offset + idx
-		lastPos = absoluteIdx
-		offset = absoluteIdx + 1
-	}
-
-	return lastPos
-}
-
-func findEnclosingTags(text string, pos int) (string, string) {
-
-	if pos > len(text) {
-		pos = len(text)
-	}
-	i := pos - 1
-	for i >= 0 {
-		if text[i] == '<' {
-
-			// Search start tag
-
-			end := i + 1
-			for end < len(text) && text[end] != '>' {
-				end++
-			}
-			if end >= len(text) {
-				break
-			}
-			tagContent := text[i+1 : end]
-			tagParts := strings.Fields(tagContent)
-			if len(tagParts) == 0 {
-				break
-			}
-			tagName := tagParts[0]
-
-			// If closed tag - skip
-
-			if strings.HasPrefix(tagName, "/") {
-				return "", ""
-			}
-			tagNameClean := strings.Split(tagName, " ")[0]
-			openTag := "<" + tagName + ">"
-			closeTag := "</" + tagNameClean + ">"
-			return openTag, closeTag
-		}
-		i--
-	}
-
-	return "", ""
 }
 
 // Events from user
@@ -436,7 +231,7 @@ func (t *TelegramBot) handleUpdate(
 
 	if msg.ReplyToMessage != nil {
 		repliedText := msg.ReplyToMessage.Text
-		if uidCode := findInvisibleUidSequences(repliedText); len(uidCode) > 0 {
+		if uidCode := telehtml.FindInvisibleIntSequences(repliedText); len(uidCode) > 0 {
 
 			// Group files
 
@@ -445,7 +240,7 @@ func (t *TelegramBot) handleUpdate(
 				for _, m := range msgs {
 					files = append(files, t.getAllFileURLs(m)...)
 				}
-				replyMessage(decodeUidInvisible(uidCode[0]), extractTextFromMessages(msgs), files)
+				replyMessage(telehtml.DecodeIntInvisible(uidCode[0]), extractTextFromMessages(msgs), files)
 			}) {
 				return
 			}
@@ -457,7 +252,7 @@ func (t *TelegramBot) handleUpdate(
 			if body == "" {
 				body = msg.Caption
 			}
-			replyMessage(decodeUidInvisible(uidCode[0]), body, files)
+			replyMessage(telehtml.DecodeIntInvisible(uidCode[0]), body, files)
 		}
 		log.Printf("Reply message received: %s", msg.Text)
 		return
@@ -466,7 +261,6 @@ func (t *TelegramBot) handleUpdate(
 	// Group files
 
 	if t.bufferAlbumMessage(msg, func(msgs []*tgbotapi.Message) {
-		t.processAlbum(msgs)
 		var rawText string
 		for _, m := range msgs {
 			if m.Text != "" {
@@ -586,85 +380,3 @@ type albumEntry struct {
 
 var albumBuffer = make(map[string]*albumEntry)
 var albumLock sync.Mutex
-
-func (t *TelegramBot) processAlbum(msgs []*tgbotapi.Message) {
-	for _, msg := range msgs {
-		files := t.getAllFileURLs(msg)
-		// обрабатывай как надо
-		log.Println("Album file(s):", files)
-	}
-}
-
-// Decode Encode UID
-
-var invisibleRunes = []rune{
-	'\u200B', // 0 Zero Width Space
-	'\u200C', // 1 Zero Width Non-Joiner
-	'\u200D', // 2 Zero Width Joiner
-	'\u2060', // 3 Word Joiner
-	'\uFEFF', // 4 Zero Width No-Break Space
-	'\u2061', // 5 Function Application
-	'\u2062', // 6 Invisible Times
-	'\u2063', // 7 Invisible Separator
-	'\u2064', // 8 Invisible Plus
-	'\u034F', // 9 Combining Grapheme Joiner
-}
-
-var runeToDigit = func() map[rune]int {
-	m := make(map[rune]int)
-	for i, r := range invisibleRunes {
-		m[r] = int(i)
-	}
-	return m
-}()
-
-var invisibleSet = func() map[rune]bool {
-	m := make(map[rune]bool)
-	for _, r := range invisibleRunes {
-		m[r] = true
-	}
-	return m
-}()
-
-func encodeUidInvisible(n int) string {
-	if n == 0 {
-		return string(invisibleRunes[0])
-	}
-
-	var result []rune
-	for n > 0 {
-		digit := n % 10
-		result = append([]rune{invisibleRunes[digit]}, result...)
-		n /= 10
-	}
-	return string(result)
-}
-
-func decodeUidInvisible(s string) int {
-	var result int
-	for _, r := range s {
-		if d, ok := runeToDigit[r]; ok {
-			result = result*10 + d
-		}
-	}
-	return result
-}
-
-func findInvisibleUidSequences(s string) []string {
-	var sequences []string
-	var current []rune
-
-	for _, r := range s {
-		if invisibleSet[r] {
-			current = append(current, r)
-		} else if len(current) > 0 {
-			sequences = append(sequences, string(current))
-			current = nil
-		}
-	}
-	if len(current) > 0 {
-		sequences = append(sequences, string(current))
-	}
-
-	return sequences
-}
