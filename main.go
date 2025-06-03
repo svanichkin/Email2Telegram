@@ -10,7 +10,16 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
+func check(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
 func main() {
+
+	// return
+
 	log.Println("Starting Email Processor...")
 
 	// Config loading
@@ -26,14 +35,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to init Telegram bot: %v", err)
 	}
-	go telegramBot.StartListener()
 
-	// Password from uzer or keychain
+	// Password from user or keychain
 
 	emailPassword, err := keyring.Get("email2Telegram", cfg.EmailUsername)
 	if err != nil {
 		emailPassword, err = telegramBot.RequestPassword(
-			fmt.Sprintf("Enter password for email %s:", cfg.EmailUsername),
+			fmt.Sprintf("%s password?", cfg.EmailUsername),
 		)
 		if err != nil {
 			log.Fatalf("Failed to get password: %v", err)
@@ -49,15 +57,25 @@ func main() {
 
 	// Mail init
 
-	emailClient, err := NewEmailClient(cfg.EmailHost, cfg.EmailPort, cfg.EmailUsername, emailPassword)
+	emailClient, err := NewEmailClient(cfg.EmailImapHost, cfg.EmailImapPort, cfg.EmailSmtpHost, cfg.EmailSmtpPort, cfg.EmailUsername, emailPassword)
 	if err != nil {
 		log.Fatalf("Failed to init email client: %v", err)
 	}
 	defer emailClient.Close()
 
+	// Telegram listener
+
+	go telegramBot.StartListener(
+		func(uid int, message string, files []struct{ Url, Name string }) {
+			emailClient.ReplyTo(uid, message, files)
+		},
+		func(to, title, message string, files []struct{ Url, Name string }) {
+			emailClient.SendMail([]string{to}, title, message, files)
+		},
+	)
+
 	// Graceful shutdown
 
-	shutdownChan := make(chan struct{})
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
 
@@ -65,8 +83,7 @@ func main() {
 		checkerFunc := func() {
 			processNewEmails(emailClient, telegramBot)
 		}
-		err := emailClient.RunWithIdleAndTickerCallback(cfg.CheckIntervalSeconds, shutdownChan, checkerFunc)
-		if err != nil {
+		if err := emailClient.RunUpdateChecker(cfg.CheckIntervalSeconds, checkerFunc); err != nil {
 			log.Fatalf("Email client error: %v", err)
 		}
 	}()
@@ -75,8 +92,6 @@ func main() {
 
 	<-signalChan
 	log.Println("Shutdown signal received")
-
-	close(shutdownChan)
 }
 
 func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot) {
@@ -98,17 +113,12 @@ func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot) {
 	// Main cycle for new letters
 
 	for _, uid := range uids {
-		_, bytes, err := emailClient.FetchMail(uid)
+		mail, err := emailClient.FetchMail(uid)
 		if err != nil {
 			log.Printf("Error fetching email %d: %v", uid, err)
 			continue
 		}
-		parsedData, err := ParseEmail(bytes, uid)
-		if err != nil {
-			log.Printf("Error parsing email %d: %v", uid, err)
-			continue
-		}
-		if err := telegramBot.SendEmailData(parsedData); err != nil {
+		if err := telegramBot.SendEmailData(ParseEmail(mail, uid)); err != nil {
 			log.Printf("Error sending email %d to Telegram: %v", uid, err)
 			continue
 		}

@@ -2,11 +2,11 @@ package main
 
 import (
 	"bufio"
-	"bytes"
+	"encoding/base64"
 	"fmt"
-	"io"
-	"log"
-	"net/mail"
+	"html"
+	"log" // Добавлен импорт для кодирования заголовков
+	"net/smtp"
 	"os"
 	"sort"
 	"strconv"
@@ -14,71 +14,162 @@ import (
 	"sync"
 	"time"
 
+	goimap "github.com/BrianLeishman/go-imap"
 	"github.com/emersion/go-imap"
 	idle "github.com/emersion/go-imap-idle"
 	"github.com/emersion/go-imap/client"
 )
 
 type EmailClient struct {
-	client *client.Client
+	idle *client.Client
+	imap *goimap.Dialer
 
-	lastProcessedUID uint32
+	lastProcessedUID int
 	dataMu           sync.Mutex
 
-	host     string
-	port     int
+	imapHost string
+	imapPort int
+	smtpHost string
+	smtpPort int
 	username string
 	password string
-
-	connMu sync.Mutex
+	connMu   sync.Mutex
 }
 
-func NewEmailClient(host string, port int, username string, password string) (*EmailClient, error) {
+// Lifecycle
 
-	// Address string
-
-	serverAddr := fmt.Sprintf("%s:%d", host, port)
-	log.Println("Connecting to IMAP server:", serverAddr)
-
-	// Create TLS client
-
-	c, err := client.DialTLS(serverAddr, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to IMAP server: %w", err)
-	}
-	c.SetDebug(os.Stdout)
-
-	// Login to server
-
-	if err := c.Login(username, password); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("failed to login: %w", err)
-	}
+func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int, username string, password string) (*EmailClient, error) {
 
 	// Load last process UID
 
 	uid, err := loadLastProcessedUID(processedUIDFile)
 	if err != nil {
-		c.Logout()
 		return nil, fmt.Errorf("failed to load processed UIDs: %w", err)
 	}
 
+	// Create IDLE client
+
+	idle, err := newIdleClient(imapHost, imapPort, username, password)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create IMAP client
+
+	goimap, err := newImapClient(imapHost, imapPort, username, password)
+	if err != nil {
+		return nil, err
+	}
+
 	return &EmailClient{
-		client:           c,
+		idle: idle,
+		imap: goimap,
+
 		lastProcessedUID: uid,
-		host:             host,
-		port:             port,
-		username:         username,
-		password:         password,
+
+		imapHost: imapHost,
+		imapPort: imapPort,
+		smtpHost: smtpHost,
+		smtpPort: smtpPort,
+		username: username,
+		password: password,
 	}, nil
 
 }
 
+func (ec *EmailClient) reconnectIfNeeded() error {
+
+	// IMAP reconnect
+
+	if !ec.imap.Connected {
+		if err := ec.imap.Reconnect(); err != nil {
+			return err
+		}
+	}
+
+	// IDLE reconnect
+
+	ec.connMu.Lock()
+	connected := ec.idle.State() == imap.AuthenticatedState || ec.idle.State() == imap.SelectedState
+	ec.connMu.Unlock()
+	if !connected {
+		if err := ec.reconnectIdle(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+
+}
+
+func newImapClient(host string, port int, username string, password string) (*goimap.Dialer, error) {
+
+	serverAddr := fmt.Sprintf("%s:%d", host, port)
+	log.Printf("Try connecting to IMAP server: %s", serverAddr)
+
+	goimap.RetryCount = 0
+	c, err := goimap.New(username, password, host, port)
+	if err != nil {
+		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
+	}
+
+	return c, nil
+}
+
+func newIdleClient(host string, port int, username string, password string) (*client.Client, error) {
+
+	serverAddr := fmt.Sprintf("%s:%d", host, port)
+	log.Printf("Try connecting to IDLE server: %s", serverAddr)
+
+	c, err := client.DialTLS(serverAddr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to IMAP server: %w", err)
+	}
+
+	if err := c.Login(username, password); err != nil {
+		c.Close()
+		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
+	}
+
+	return c, nil
+}
+
+func (ec *EmailClient) reconnectIdle() error {
+
+	ec.connMu.Lock()
+	defer ec.connMu.Unlock()
+	if ec.idle != nil {
+		ec.idle.Close()
+		ec.idle = nil
+	}
+	c, err := newIdleClient(ec.imapHost, ec.imapPort, ec.username, ec.password)
+	if err != nil {
+		return err
+	}
+	ec.idle = c
+
+	return nil
+}
+
 func (ec *EmailClient) Close() {
 
-	if ec.client != nil {
-		log.Println("Logging out...")
-		err := ec.client.Logout()
+	// IDLE Close
+
+	if ec.idle != nil {
+		log.Println("IDLE logging out...")
+		err := ec.idle.Logout()
+		if err != nil {
+			log.Printf("Error during logout: %v", err)
+		} else {
+			log.Println("Logged out successfully")
+		}
+	}
+
+	// IMAP Close
+
+	if ec.imap != nil {
+		log.Println("IMAP logging out...")
+		err := ec.imap.Close()
 		if err != nil {
 			log.Printf("Error during logout: %v", err)
 		} else {
@@ -88,64 +179,9 @@ func (ec *EmailClient) Close() {
 
 }
 
-func (ec *EmailClient) FetchMail(uid uint32) (*mail.Message, []byte, error) {
+// Listener
 
-	// Reconnect if needed
-
-	if err := ec.reconnectIfNeeded(); err != nil {
-		return nil, nil, err
-	}
-
-	// Fetch from INBOX
-
-	if ec.client.Mailbox() == nil || ec.client.Mailbox().Name != "INBOX" {
-		log.Println("Selecting INBOX for FetchMail...")
-		_, err := ec.client.Select("INBOX", false)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to select INBOX for fetch: %w", err)
-		}
-	}
-	seqset := new(imap.SeqSet)
-	seqset.AddNum(uid)
-	section := &imap.BodySectionName{}
-	items := []imap.FetchItem{
-		imap.FetchEnvelope,
-		imap.FetchFlags,
-		imap.FetchUid,
-		imap.FetchRFC822Size,
-		section.FetchItem(),
-	}
-	messages := make(chan *imap.Message, 1)
-	if err := ec.client.UidFetch(seqset, items, messages); err != nil {
-		return nil, nil, fmt.Errorf("failed to fetch email with UID %d: %w", uid, err)
-	}
-
-	var msg *imap.Message
-	select {
-	case msg = <-messages:
-	case <-time.After(5 * time.Second):
-		return nil, nil, fmt.Errorf("timeout waiting for message UID %d", uid)
-	}
-	if msg == nil {
-		return nil, nil, fmt.Errorf("no message found for UID %d", uid)
-	}
-	bodyReader := msg.GetBody(section)
-	if bodyReader == nil {
-		return nil, nil, fmt.Errorf("could not find body for message UID %d", uid)
-	}
-	data, err := io.ReadAll(bodyReader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read body for UID %d: %w", uid, err)
-	}
-	parsedMail, err := mail.ReadMessage(bytes.NewReader(data))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse email for UID %d: %w", uid, err)
-	}
-
-	return parsedMail, data, nil
-}
-
-func (ec *EmailClient) RunWithIdleAndTickerCallback(intervalSec int, shutdownChan <-chan struct{}, callback func()) error {
+func (ec *EmailClient) RunUpdateChecker(intervalSec int, callback func()) error {
 
 	var mu sync.Mutex
 	isProcessing := false
@@ -167,24 +203,18 @@ func (ec *EmailClient) RunWithIdleAndTickerCallback(intervalSec int, shutdownCha
 		callback()
 	}
 
-	// Tick
+	// Tick event
 
 	go func() {
 		ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				log.Println("[Ticker] Triggered email check")
-				processNewEmailsSafe()
-			case <-shutdownChan:
-				log.Println("Ticker goroutine shutting down")
-				return
-			}
+		for range ticker.C { // Упрощен цикл
+			log.Println("[Ticker] Triggered email check")
+			processNewEmailsSafe()
 		}
 	}()
 
-	// IDLE + callback
+	// IDLE event
 
 	err := ec.startIdle(func() {
 		log.Println("[IDLE] Triggered email check")
@@ -204,20 +234,19 @@ func (ec *EmailClient) startIdle(onUpdate func()) error {
 
 	// Select INBOX
 
-	_, err := ec.client.Select("INBOX", false)
+	_, err := ec.idle.Select("INBOX", false)
 	if err != nil {
 		return fmt.Errorf("failed to select INBOX: %w", err)
 	}
 	log.Println("[IDLE] INBOX selected, ready to enter IDLE mode.")
 
-	idleClient := idle.NewClient(ec.client)
+	idleClient := idle.NewClient(ec.idle)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
 
-	// IMAP chan
-
-	updates := make(chan client.Update)
-	ec.client.Updates = updates
+	// IMAP chan - добавлен буфер
+	updates := make(chan client.Update, 100)
+	ec.idle.Updates = updates
 
 	// Start IDLE
 
@@ -262,41 +291,58 @@ func (ec *EmailClient) startIdle(onUpdate func()) error {
 	return nil
 }
 
+// Helpers
+
+func (ec *EmailClient) FetchMail(uid int) (*goimap.Email, error) {
+
+	// Reconnect if needed
+
+	if err := ec.reconnectIfNeeded(); err != nil {
+		return nil, err
+	}
+
+	// Fetch from INBOX
+
+	if ec.imap.Folder != "INBOX" {
+		log.Println("Selecting INBOX for FetchMail...")
+		err := ec.imap.SelectFolder("INBOX")
+		if err != nil {
+			return nil, fmt.Errorf("failed to select INBOX for fetch: %w", err)
+		}
+	}
+	emails, err := ec.imap.GetEmails(int(uid))
+	if err != nil {
+		return nil, err
+	}
+	if len(emails) == 0 {
+		return nil, fmt.Errorf("no mail in INBOX with uid: %d", uid)
+	}
+
+	return emails[int(uid)], nil
+}
+
 // Work with UID
 
-func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
+func (ec *EmailClient) ListNewMailUIDs() ([]int, error) {
+
+	// Reconnect if needed
+
+	if err := ec.reconnectIfNeeded(); err != nil {
+		return nil, err
+	}
 
 	// Connect to INBOX
 
-	const timeoutSelect = 5 * time.Minute
-	mbox, err := ec.selectInboxWithTimeout(timeoutSelect)
-	if err != nil {
-		log.Printf("SELECT INBOX failed (%v), attempting reconnect and retry", err)
-
-		if reconErr := ec.reconnectIfNeeded(); reconErr != nil {
-			return nil, fmt.Errorf("reconnect failed after select inbox error: %v (initial select error: %w)", reconErr, err)
-		}
-		mbox, err = ec.selectInboxWithTimeout(timeoutSelect)
+	if ec.imap.Folder != "INBOX" {
+		log.Println("Selecting INBOX for ListNewMailUIDs...")
+		err := ec.imap.SelectFolder("INBOX")
 		if err != nil {
-			return nil, fmt.Errorf("select inbox failed again after reconnect: %w", err)
+			return nil, fmt.Errorf("failed to select INBOX for fetch: %w", err)
 		}
 	}
-	log.Printf("INBOX selected, mailbox has %d messages", mbox.Messages)
-
-	// Search new UIDs
-
-	criteria := imap.NewSearchCriteria()
-	criteria.WithoutFlags = []string{imap.DeletedFlag}
-	newUIDs, err := ec.uidSearchWithTimeout(criteria, timeoutSelect)
+	newUIDs, err := ec.imap.GetUIDs("UNDELETED")
 	if err != nil {
-		log.Printf("UID search failed (%v), attempting reconnect and retry", err)
-		if reconErr := ec.reconnectIfNeeded(); reconErr != nil {
-			return nil, fmt.Errorf("reconnect failed after search error: %v (initial search error: %w)", reconErr, err)
-		}
-		newUIDs, err = ec.uidSearchWithTimeout(criteria, timeoutSelect)
-		if err != nil {
-			return nil, fmt.Errorf("UID search failed again after reconnect: %w", err)
-		}
+		return nil, fmt.Errorf("UID search failed: %w", err)
 	}
 	log.Printf("Found total %d UIDs in INBOX", len(newUIDs))
 
@@ -304,7 +350,7 @@ func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
 
 	ec.dataMu.Lock()
 	defer ec.dataMu.Unlock()
-	var unprocessed []uint32
+	var unprocessed []int
 	for _, uid := range newUIDs {
 		if uid > ec.lastProcessedUID {
 			unprocessed = append(unprocessed, uid)
@@ -316,7 +362,7 @@ func (ec *EmailClient) ListNewMailUIDs() ([]uint32, error) {
 	return unprocessed, nil
 }
 
-func (ec *EmailClient) MarkUIDAsProcessed(uid uint32) error {
+func (ec *EmailClient) MarkUIDAsProcessed(uid int) error {
 
 	ec.dataMu.Lock()
 	if uid > ec.lastProcessedUID {
@@ -327,7 +373,7 @@ func (ec *EmailClient) MarkUIDAsProcessed(uid uint32) error {
 	return saveLastProcessedUID(processedUIDFile, ec.lastProcessedUID)
 }
 
-func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []uint32) ([]uint32, error) {
+func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []int) ([]int, error) {
 
 	if _, err := os.Stat(processedUIDFile); os.IsNotExist(err) && len(uids) > 0 {
 		maxUID := uids[0]
@@ -353,7 +399,7 @@ func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []uint32) ([]uint32, error) {
 
 const processedUIDFile = "last_processed_uid.txt"
 
-func loadLastProcessedUID(filePath string) (uint32, error) {
+func loadLastProcessedUID(filePath string) (int, error) {
 
 	// Open uid file
 
@@ -374,124 +420,125 @@ func loadLastProcessedUID(filePath string) (uint32, error) {
 		if val == "" {
 			return 0, nil
 		}
-		uid64, err := strconv.ParseUint(val, 10, 32)
+		uid, err := strconv.ParseInt(val, 10, 32)
 		if err != nil {
 			return 0, fmt.Errorf("invalid last UID: %w", err)
 		}
-		return uint32(uid64), nil
+		return int(uid), nil
 	}
 
 	return 0, nil
 }
 
-func saveLastProcessedUID(filePath string, uid uint32) error {
+func saveLastProcessedUID(filePath string, uid int) error {
 
 	return os.WriteFile(filePath, []byte(fmt.Sprintf("%d\n", uid)), 0644)
 
 }
 
-func (ec *EmailClient) selectInboxWithTimeout(timeout time.Duration) (*imap.MailboxStatus, error) {
+// Replay email
 
-	resultChan := make(chan struct {
-		mbox *imap.MailboxStatus
-		err  error
-	}, 1)
+func (ec *EmailClient) ReplyTo(uid int, message string, files []struct{ Url, Name string }) error {
 
-	go func() {
-		mbox, err := ec.client.Select("INBOX", false)
-		resultChan <- struct {
-			mbox *imap.MailboxStatus
-			err  error
-		}{mbox, err}
-	}()
+	// Reconnect if needed
 
-	select {
-	case res := <-resultChan:
-		return res.mbox, res.err
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("timeout reached in selectInboxWithTimeout after %v", timeout)
+	if err := ec.reconnectIfNeeded(); err != nil {
+		return fmt.Errorf("failed to reconnect: %w", err)
 	}
 
+	// Get original mail
+
+	mail, err := ec.FetchMail(uid)
+	if err != nil {
+		return fmt.Errorf("error fetching email %d: %w", uid, err)
+	}
+
+	// Make new mail
+
+	var attachments string
+	if len(files) > 0 {
+		attachments += "<ul>"
+		for _, f := range files {
+			attachments += fmt.Sprintf(`<li><a href="%s">%s</a></li>`, f.Url, html.EscapeString(f.Name))
+		}
+		attachments += "</ul>"
+	}
+	body := fmt.Sprintf("<p>%s</p>%s", html.EscapeString(message), attachments)
+
+	addresses := mail.From
+	if len(mail.ReplyTo) > 0 {
+		addresses = mail.ReplyTo
+		log.Printf("Using Reply-To address %v instead of From %v", mail.ReplyTo, mail.From)
+	}
+	var to []string
+	for address := range addresses {
+		to = append(to, address)
+	}
+	msg := getHTMLMsg(ec.username, to, mail.Subject, body)
+
+	// Send
+
+	err = smtp.SendMail(
+		fmt.Sprintf("%s:%d", ec.smtpHost, ec.smtpPort),
+		smtp.PlainAuth("", ec.username, ec.password, ec.smtpHost),
+		ec.username,
+		to,
+		[]byte(msg),
+	)
+	if err != nil {
+		return fmt.Errorf("smtp error: %s", err)
+	}
+
+	log.Printf("Successfully sent reply to email %d", uid)
+	return nil
 }
 
-func (ec *EmailClient) uidSearchWithTimeout(criteria *imap.SearchCriteria, timeout time.Duration) ([]uint32, error) {
+func (ec *EmailClient) SendMail(to []string, title string, message string, files []struct{ Url, Name string }) error {
 
-	resultChan := make(chan struct {
-		uids []uint32
-		err  error
-	}, 1)
-
-	go func() {
-		uids, err := ec.client.UidSearch(criteria)
-		resultChan <- struct {
-			uids []uint32
-			err  error
-		}{uids, err}
-	}()
-
-	select {
-	case res := <-resultChan:
-		return res.uids, res.err
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("timeout occurred during UID SEARCH after %v", timeout)
+	var attachments string
+	if len(files) > 0 {
+		attachments += "<ul>"
+		for _, f := range files {
+			attachments += fmt.Sprintf(`<li><a href="%s">%s</a></li>`, f.Url, html.EscapeString(f.Name))
+		}
+		attachments += "</ul>"
 	}
+	body := fmt.Sprintf("<p>%s</p>%s", html.EscapeString(message), attachments)
+	msg := getHTMLMsg(ec.username, to, title, body)
 
+	// Send
+
+	err := smtp.SendMail(
+		fmt.Sprintf("%s:%d", ec.smtpHost, ec.smtpPort),
+		smtp.PlainAuth("", ec.username, ec.password, ec.smtpHost),
+		ec.username,
+		to,
+		[]byte(msg),
+	)
+	if err != nil {
+		return fmt.Errorf("smtp error: %s", err)
+	}
+	log.Printf("Successfully sent email to %s", strings.Join(to, ", "))
+
+	return nil
 }
 
-func (ec *EmailClient) reconnectIfNeeded() error {
-
-	ec.connMu.Lock()
-	connected := ec.client != nil && (ec.client.State() == imap.AuthenticatedState || ec.client.State() == imap.SelectedState)
-	ec.connMu.Unlock()
-
-	if connected {
-		return nil
-	}
-
-	return ec.reconnectWithRetries(0, 10*time.Second)
+func getHTMLMsg(username string, to []string, subject, body string) string {
+	return "From: " + username + "\n" +
+		"To: " + strings.Join(to, ", ") + "\n" +
+		"Subject: =?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte("Re: "+subject)) + "?=\r\n" +
+		"Content-Type: text/html; charset=UTF-8\r\n" +
+		"Content-Transfer-Encoding: base64\r\n" +
+		"MIME-Version: 1.0\r\n\r\n" +
+		base64.StdEncoding.EncodeToString([]byte(body)) + "\r\n"
 }
 
-func (ec *EmailClient) reconnectWithRetries(maxAttempts int, initialDelay time.Duration) error {
-
-	var lastErr error
-	currentDelay := initialDelay
-	for attempt := 1; maxAttempts <= 0 || attempt <= maxAttempts; attempt++ {
-		ec.connMu.Lock()
-
-		if ec.client != nil {
-			ec.client.Close()
-			ec.client = nil
-		}
-
-		serverAddr := fmt.Sprintf("%s:%d", ec.host, ec.port)
-		log.Printf("Attempt [%d] reconnecting to IMAP server: %s", attempt, serverAddr)
-
-		c, err := client.DialTLS(serverAddr, nil)
-		if err == nil {
-			err = c.Login(ec.username, ec.password)
-			if err == nil {
-				ec.client = c
-				ec.connMu.Unlock()
-				log.Println("Successfully reconnected.")
-				return nil
-			}
-			c.Close()
-		}
-
-		lastErr = err
-		ec.connMu.Unlock()
-
-		log.Printf(
-			"Reconnect attempt [%d] failed: %v. Retrying in %v...",
-			attempt, err, currentDelay)
-
-		time.Sleep(currentDelay)
-
-		currentDelay *= 2
-		if currentDelay > 5*time.Minute {
-			currentDelay = 5 * time.Minute // макс. задержка
-		}
-	}
-
-	return fmt.Errorf("unable to reconnect after %d attempts: %w", maxAttempts, lastErr)
+func getTextMsg(username string, to []string, subject, body string) string {
+	return "From: " + username + "\n" +
+		"To: " + strings.Join(to, ", ") + "\n" +
+		"Subject: =?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte("Re: "+subject)) + "?=\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n" +
+		"Content-Transfer-Encoding: base64\r\n" +
+		"MIME-Version: 1.0\r\n\r\n" +
+		base64.StdEncoding.EncodeToString([]byte(body)) + "\r\n"
 }

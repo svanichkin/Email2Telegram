@@ -1,21 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
-	"log"
-	"net/mail"
 	"regexp"
 	"strings"
 
+	goimap "github.com/BrianLeishman/go-imap"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/microcosm-cc/bluemonday"
-
-	"github.com/jhillyerd/enmime"
 )
 
 type ParsedEmailData struct {
-	Uid         uint32
+	Uid         int
 	From        string
 	To          string
 	Subject     string
@@ -23,65 +19,32 @@ type ParsedEmailData struct {
 	Attachments map[string][]byte
 }
 
-func ParseEmail(raw []byte, uid uint32) (*ParsedEmailData, error) {
-
-	// Eml reader
-
-	env, err := enmime.ReadEnvelope(bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
+func ParseEmail(mail *goimap.Email, uid int) *ParsedEmailData {
 
 	// Compile fields
 
 	data := &ParsedEmailData{
-		Uid:         uid,
-		Subject:     env.GetHeader("Subject"),
-		TextBody:    env.Text,
+		Uid: uid,
+
+		From: parseAddressList(mail.From),
+		To:   parseAddressList(mail.To),
+
+		Subject:     mail.Subject,
+		TextBody:    mail.Text,
 		Attachments: make(map[string][]byte),
 	}
 
-	if from := env.GetHeader("From"); from != "" {
-		data.From = parseAddressList(from)
-	}
-	if to := env.GetHeader("To"); to != "" {
-		data.To = parseAddressList(to)
-	} else {
-		data.To = ""
-	}
-	if env.HTML != "" {
-		data.TextBody = CleanTelegramHTML(env.HTML)
-	}
-
-	// Attachments
-
-	for _, att := range findAllAttachments(env) {
-		data.Attachments[att.FileName] = att.Content
-	}
-
-	return data, nil
-}
-
-func findAllAttachments(env *enmime.Envelope) []*enmime.Part {
-
-	var attachments []*enmime.Part
-	var walk func(part *enmime.Part)
-	walk = func(part *enmime.Part) {
-		if part == nil {
-			return
-		}
-
-		if part.FileName != "" && len(part.Content) > 0 {
-			attachments = append(attachments, part)
-		}
-
-		for child := part.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
+	if len(mail.Attachments) > 0 {
+		for _, a := range mail.Attachments {
+			data.Attachments[a.Name] = a.Content
 		}
 	}
-	walk(env.Root)
 
-	return attachments
+	if mail.HTML != "" {
+		data.TextBody = CleanTelegramHTML(mail.HTML)
+	}
+
+	return data
 }
 
 func CleanTelegramHTML(raw string) string {
@@ -189,23 +152,14 @@ func sanitizeHTML(html string) string {
 	return html
 }
 
-func parseAddressList(header string) string {
-
-	// Get adresses
-
-	addrs, err := mail.ParseAddressList(header)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Formatting
+func parseAddressList(m map[string]string) string {
 
 	var result []string
-	for _, addr := range addrs {
-		if addr.Name != "" {
-			result = append(result, fmt.Sprintf("%s %s", addr.Address, addr.Name))
+	for address, name := range m {
+		if name != "" {
+			result = append(result, fmt.Sprintf("%s %s", address, name))
 		} else {
-			result = append(result, addr.Address)
+			result = append(result, address)
 		}
 	}
 
