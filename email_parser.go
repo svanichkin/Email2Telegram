@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/BrianLeishman/go-imap"
+	"github.com/svanichkin/go-imap"
 	"github.com/svanichkin/TelegramHTML"
 )
 

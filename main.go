@@ -79,14 +79,12 @@ func main() {
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
 
-	go func() {
-		checkerFunc := func() {
-			processNewEmails(emailClient, telegramBot)
-		}
-		if err := emailClient.RunUpdateChecker(cfg.CheckIntervalSeconds, checkerFunc); err != nil {
-			log.Fatalf("Email client error: %v", err)
-		}
-	}()
+	err = emailClient.RunUpdateChecker(func() {
+		processNewEmails(emailClient, telegramBot)
+	})
+	if err != nil {
+		log.Fatalf("Email client error: %v", err)
+	}
 
 	// Waiting signal OS
 

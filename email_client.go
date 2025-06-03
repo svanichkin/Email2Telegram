@@ -5,24 +5,19 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html"
-	"log" // Добавлен импорт для кодирования заголовков
+	"log"
 	"net/smtp"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
-	goimap "github.com/BrianLeishman/go-imap"
-	"github.com/emersion/go-imap"
-	idle "github.com/emersion/go-imap-idle"
-	"github.com/emersion/go-imap/client"
+	"github.com/svanichkin/go-imap"
 )
 
 type EmailClient struct {
-	idle *client.Client
-	imap *goimap.Dialer
+	imap *imap.Dialer
 
 	lastProcessedUID int
 	dataMu           sync.Mutex
@@ -33,7 +28,6 @@ type EmailClient struct {
 	smtpPort int
 	username string
 	password string
-	connMu   sync.Mutex
 }
 
 // Lifecycle
@@ -47,23 +41,19 @@ func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int
 		return nil, fmt.Errorf("failed to load processed UIDs: %w", err)
 	}
 
-	// Create IDLE client
-
-	idle, err := newIdleClient(imapHost, imapPort, username, password)
-	if err != nil {
-		return nil, err
-	}
-
 	// Create IMAP client
 
-	goimap, err := newImapClient(imapHost, imapPort, username, password)
+	serverAddr := fmt.Sprintf("%s:%d", imapHost, imapPort)
+	log.Printf("Try connecting to IMAP server: %s", serverAddr)
+
+	imap.RetryCount = 0
+	c, err := imap.New(username, password, imapHost, imapPort)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
 	}
 
 	return &EmailClient{
-		idle: idle,
-		imap: goimap,
+		imap: c,
 
 		lastProcessedUID: uid,
 
@@ -87,83 +77,11 @@ func (ec *EmailClient) reconnectIfNeeded() error {
 		}
 	}
 
-	// IDLE reconnect
-
-	ec.connMu.Lock()
-	connected := ec.idle.State() == imap.AuthenticatedState || ec.idle.State() == imap.SelectedState
-	ec.connMu.Unlock()
-	if !connected {
-		if err := ec.reconnectIdle(); err != nil {
-			return err
-		}
-	}
-
 	return nil
 
-}
-
-func newImapClient(host string, port int, username string, password string) (*goimap.Dialer, error) {
-
-	serverAddr := fmt.Sprintf("%s:%d", host, port)
-	log.Printf("Try connecting to IMAP server: %s", serverAddr)
-
-	goimap.RetryCount = 0
-	c, err := goimap.New(username, password, host, port)
-	if err != nil {
-		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
-	}
-
-	return c, nil
-}
-
-func newIdleClient(host string, port int, username string, password string) (*client.Client, error) {
-
-	serverAddr := fmt.Sprintf("%s:%d", host, port)
-	log.Printf("Try connecting to IDLE server: %s", serverAddr)
-
-	c, err := client.DialTLS(serverAddr, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to IMAP server: %w", err)
-	}
-
-	if err := c.Login(username, password); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
-	}
-
-	return c, nil
-}
-
-func (ec *EmailClient) reconnectIdle() error {
-
-	ec.connMu.Lock()
-	defer ec.connMu.Unlock()
-	if ec.idle != nil {
-		ec.idle.Close()
-		ec.idle = nil
-	}
-	c, err := newIdleClient(ec.imapHost, ec.imapPort, ec.username, ec.password)
-	if err != nil {
-		return err
-	}
-	ec.idle = c
-
-	return nil
 }
 
 func (ec *EmailClient) Close() {
-
-	// IDLE Close
-
-	if ec.idle != nil {
-		log.Println("IDLE logging out...")
-		err := ec.idle.Logout()
-		if err != nil {
-			log.Printf("Error during logout: %v", err)
-		} else {
-			log.Println("Logged out successfully")
-		}
-	}
 
 	// IMAP Close
 
@@ -181,10 +99,10 @@ func (ec *EmailClient) Close() {
 
 // Listener
 
-func (ec *EmailClient) RunUpdateChecker(intervalSec int, callback func()) error {
-
+func (ec *EmailClient) RunUpdateChecker(callback func()) error {
 	var mu sync.Mutex
 	isProcessing := false
+	var idleHandler imap.IdleHandler
 	processNewEmailsSafe := func() {
 		mu.Lock()
 		if isProcessing {
@@ -194,106 +112,50 @@ func (ec *EmailClient) RunUpdateChecker(intervalSec int, callback func()) error 
 		isProcessing = true
 		mu.Unlock()
 
-		defer func() {
-			mu.Lock()
-			isProcessing = false
-			mu.Unlock()
-		}()
+		go func() {
+			defer func() {
+				mu.Lock()
+				isProcessing = false
+				mu.Unlock()
+				if err := ec.startIdleWithHandler(&idleHandler); err != nil {
+					log.Printf("Failed to restart IDLE: %v", err)
+				}
+			}()
 
-		callback()
+			callback()
+		}()
+	}
+	idleHandler = imap.IdleHandler{
+		OnExists: func(event imap.ExistsEvent) {
+			log.Println("[IDLE] New email arrived:", event.MessageIndex)
+			ec.imap.StopIdle()
+			processNewEmailsSafe()
+		},
+		OnExpunge: func(event imap.ExpungeEvent) {
+			log.Println("[IDLE] Email expunged:", event.MessageIndex)
+		},
+		OnFetch: func(event imap.FetchEvent) {
+			log.Println("[IDLE] Email fetched:", event.MessageIndex, event.UID)
+		},
 	}
 
-	// Tick event
-
-	go func() {
-		ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
-		defer ticker.Stop()
-		for range ticker.C { // Упрощен цикл
-			log.Println("[Ticker] Triggered email check")
-			processNewEmailsSafe()
-		}
-	}()
-
-	// IDLE event
-
-	err := ec.startIdle(func() {
-		log.Println("[IDLE] Triggered email check")
-		processNewEmailsSafe()
-	})
-
-	return err
+	return ec.startIdleWithHandler(&idleHandler)
 }
 
-func (ec *EmailClient) startIdle(onUpdate func()) error {
+func (ec *EmailClient) startIdleWithHandler(handler *imap.IdleHandler) error {
 
-	// Reconnect if needed
-
-	if err := ec.reconnectIfNeeded(); err != nil {
-		return fmt.Errorf("cannot connect via IMAP for IDLE: %w", err)
+	log.Println("(Re)starting IDLE mode")
+	folder := "INBOX"
+	if err := ec.selectFolder(folder); err != nil {
+		return err
 	}
 
-	// Select INBOX
-
-	_, err := ec.idle.Select("INBOX", false)
-	if err != nil {
-		return fmt.Errorf("failed to select INBOX: %w", err)
-	}
-	log.Println("[IDLE] INBOX selected, ready to enter IDLE mode.")
-
-	idleClient := idle.NewClient(ec.idle)
-	stop := make(chan struct{})
-	done := make(chan error, 1)
-
-	// IMAP chan - добавлен буфер
-	updates := make(chan client.Update, 100)
-	ec.idle.Updates = updates
-
-	// Start IDLE
-
-	go func(stopCh chan struct{}) {
-		log.Println("[IDLE] Entering IMAP IDLE mode; waiting for updates from server.")
-		done <- idleClient.Idle(stopCh)
-	}(stop)
-
-	// Restart and parse IDLE
-
-	go func() {
-		for {
-			select {
-			case update := <-updates:
-				log.Printf("[IDLE] Received IMAP update: %v", update)
-				if onUpdate != nil {
-					onUpdate()
-				}
-			case err := <-done:
-				if err != nil {
-					log.Printf("[IDLE] Error received during IDLE mode: %v", err)
-				} else {
-					log.Println("[IDLE] IDLE mode ended normally without error.")
-				}
-				return
-			case <-time.After(15 * time.Minute):
-				log.Println("[IDLE] Restarting IDLE mode to prevent timeout.")
-				close(stop)
-				time.Sleep(time.Second)
-
-				// Restart IDLE
-
-				stop = make(chan struct{})
-				go func(stopCh chan struct{}) {
-					log.Println("[IDLE] Re-entering IMAP IDLE mode; waiting again for updates.")
-					done <- idleClient.Idle(stopCh)
-				}(stop)
-			}
-		}
-	}()
-
-	return nil
+	return ec.imap.StartIdle(handler)
 }
 
 // Helpers
 
-func (ec *EmailClient) FetchMail(uid int) (*goimap.Email, error) {
+func (ec *EmailClient) FetchMail(uid int) (*imap.Email, error) {
 
 	// Reconnect if needed
 
@@ -303,22 +165,32 @@ func (ec *EmailClient) FetchMail(uid int) (*goimap.Email, error) {
 
 	// Fetch from INBOX
 
-	if ec.imap.Folder != "INBOX" {
-		log.Println("Selecting INBOX for FetchMail...")
-		err := ec.imap.SelectFolder("INBOX")
-		if err != nil {
-			return nil, fmt.Errorf("failed to select INBOX for fetch: %w", err)
-		}
+	folder := "INBOX"
+	if err := ec.selectFolder(folder); err != nil {
+		return nil, err
 	}
 	emails, err := ec.imap.GetEmails(int(uid))
 	if err != nil {
 		return nil, err
 	}
 	if len(emails) == 0 {
-		return nil, fmt.Errorf("no mail in INBOX with uid: %d", uid)
+		return nil, fmt.Errorf("no mail in %s with uid: %d", folder, uid)
 	}
 
 	return emails[int(uid)], nil
+}
+
+func (ec *EmailClient) selectFolder(folder string) error {
+
+	if ec.imap.Folder != folder {
+		log.Println("Selecting " + folder + " for FetchMail...")
+		err := ec.imap.SelectFolder(folder)
+		if err != nil {
+			return fmt.Errorf("failed to select "+folder+" for fetch: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // Work with UID
@@ -333,18 +205,15 @@ func (ec *EmailClient) ListNewMailUIDs() ([]int, error) {
 
 	// Connect to INBOX
 
-	if ec.imap.Folder != "INBOX" {
-		log.Println("Selecting INBOX for ListNewMailUIDs...")
-		err := ec.imap.SelectFolder("INBOX")
-		if err != nil {
-			return nil, fmt.Errorf("failed to select INBOX for fetch: %w", err)
-		}
+	folder := "INBOX"
+	if err := ec.selectFolder(folder); err != nil {
+		return nil, err
 	}
 	newUIDs, err := ec.imap.GetUIDs("UNDELETED")
 	if err != nil {
 		return nil, fmt.Errorf("UID search failed: %w", err)
 	}
-	log.Printf("Found total %d UIDs in INBOX", len(newUIDs))
+	log.Printf("Found total %d UIDs in %s", len(newUIDs), folder)
 
 	// Unprocessed UIDs
 

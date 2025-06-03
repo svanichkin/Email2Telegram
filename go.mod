@@ -5,7 +5,7 @@ go 1.23.0
 toolchain go1.23.9
 
 require (
-	github.com/emersion/go-imap v1.2.1
+	github.com/BrianLeishman/go-imap v0.1.7
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/svanichkin/TelegramHTML v1.1.0
 	gopkg.in/ini.v1 v1.67.0
@@ -38,13 +38,10 @@ require (
 )
 
 require (
-	github.com/BrianLeishman/go-imap v0.1.7
-	github.com/emersion/go-imap-idle v0.0.0-20210907174914-db2568431445
-	github.com/emersion/go-message v0.18.2 // indirect
-	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
 	github.com/jhillyerd/enmime v1.3.0 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect
+	github.com/svanichkin/go-imap v0.1.9
 	github.com/zalando/go-keyring v0.2.6
 	golang.org/x/text v0.25.0 // indirect
 )

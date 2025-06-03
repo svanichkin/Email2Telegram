@@ -9,7 +9,7 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/svanichkin/TelegramHTML"
+	telehtml "github.com/svanichkin/TelegramHTML"
 )
 
 type TelegramBot struct {
@@ -111,7 +111,7 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	// Header + text, then split
 
 	var messages []string
-	text := "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n<a href=\"https://t.me/email_redirect_bot?start=msg12345\">Открыть сообщение</a>\n\n" + data.TextBody
+	text := "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n" + data.TextBody
 	messages = telehtml.SplitTelegramHTML(text)
 
 	// Send messages

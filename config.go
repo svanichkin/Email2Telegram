@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 
 	"gopkg.in/ini.v1"
 )
@@ -50,7 +49,7 @@ func LoadConfig(filePath string) (*Config, error) {
 	cfg.EmailUsername = configFile.Section("email").Key("username").String()
 	cfg.TelegramToken = configFile.Section("telegram").Key("token").String()
 	cfg.TelegramUserID, _ = configFile.Section("telegram").Key("user_id").Int64()
-	cfg.CheckIntervalSeconds, _ = configFile.Section("app").Key("check_interval_seconds").Int()
+
 	if cfg.EmailImapPort == 0 {
 		cfg.EmailImapPort = 993
 	}
@@ -59,13 +58,6 @@ func LoadConfig(filePath string) (*Config, error) {
 	}
 	if cfg.EmailImapHost == "" || cfg.EmailSmtpHost == "" || cfg.EmailUsername == "" || cfg.TelegramToken == "" || cfg.TelegramUserID == 0 {
 		return nil, fmt.Errorf("missing required configuration fields: EmailHost, EmailPort, EmailUsername, TelegramToken, TelegramUserID. CheckIntervalSeconds can have a default or be set in [app] section")
-	}
-
-	// Retest Config file
-
-	if cfg.CheckIntervalSeconds <= 0 {
-		log.Println("Warning: CheckIntervalSeconds not found in config or is invalid. Defaulting to 300 seconds.")
-		cfg.CheckIntervalSeconds = 300 // Default to 5 minutes
 	}
 
 	return &cfg, nil
