@@ -277,6 +277,9 @@ func (t *TelegramBot) handleUpdate(
 	to, title, body, ok := parseMailContent(msgText)
 	if !ok {
 		log.Println("Invalid mail format in single message")
+		t.SendMessage("Hi! I'm your mail bot.")
+		t.SendMessage("To reply to an email, just reply to the message and \n\nenter your text, and attach files if needed.")
+		t.SendMessage("To send a new email, use the format:\n\nto.user@mail.example.com\nSubject line\nEmail text\n\nAttach files if needed.")
 		return
 	}
 	files := t.getAllFileURLs(msg)

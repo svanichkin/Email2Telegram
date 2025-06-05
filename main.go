@@ -81,10 +81,16 @@ func main() {
 
 	go telegramBot.StartListener(
 		func(uid int, message string, files []struct{ Url, Name string }) {
-			emailClient.ReplyTo(uid, message, files)
+			err := emailClient.ReplyTo(uid, message, files)
+			if err != nil {
+				telegramBot.SendMessage("Failed to reply email for!")
+			}
 		},
 		func(to, title, message string, files []struct{ Url, Name string }) {
-			emailClient.SendMail([]string{to}, title, message, files)
+			err := emailClient.SendMail([]string{to}, title, message, files)
+			if err != nil {
+				telegramBot.SendMessage("Failed to send email!")
+			}
 		},
 	)
 
