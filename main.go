@@ -6,6 +6,7 @@ import (
 	"net/mail"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/svanichkin/go-imap"
@@ -13,13 +14,11 @@ import (
 
 func main() {
 
-	// return
-
 	log.Println("Starting Email Processor...")
 
 	// Config loading
 
-	cfg, err := LoadConfig("config.ini")
+	cfg, err := LoadConfig(filepath.Base(os.Args[0]))
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}

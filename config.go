@@ -18,7 +18,7 @@ import (
 	_ "embed"
 )
 
-//go:embed config.ini
+//go:embed email2telegram.conf
 var configContent []byte
 
 type Config struct {
@@ -33,7 +33,7 @@ type Config struct {
 
 func LoadConfig(filePath string) (*Config, error) {
 
-	// Load file
+	// Load file from embed
 
 	configFile, err := ini.Load(configContent)
 	if err != nil {
@@ -42,12 +42,35 @@ func LoadConfig(filePath string) (*Config, error) {
 
 	var cfg Config
 
-	// Parse telegram section
+	// Parse telegram section from embed
 
 	cfg.TelegramToken = configFile.Section("telegram").Key("token").String()
 	cfg.TelegramUserId, _ = configFile.Section("telegram").Key("user_id").Int64()
 	if cfg.TelegramToken == "" || cfg.TelegramUserId == 0 {
-		return nil, fmt.Errorf("missing required configuration fields: TelegramToken, TelegramUserID. CheckIntervalSeconds can have a default or be set in [app] section")
+
+		// Create new conf from template
+
+		configFilename := filePath + ".conf"
+		_, err = os.Stat(configFilename)
+		if err != nil || os.IsNotExist(err) {
+			err := os.WriteFile(configFilename, configContent, 0600)
+			if err != nil {
+				return nil, fmt.Errorf("failed to write config to disk: %w", err)
+			}
+			return nil, fmt.Errorf("missing required configuration fields: TelegramToken, TelegramUserID")
+		}
+
+		// Or load from disk
+
+		configFile, err = ini.Load(configFilename)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load config file: %w", err)
+		}
+		cfg.TelegramToken = configFile.Section("telegram").Key("token").String()
+		cfg.TelegramUserId, _ = configFile.Section("telegram").Key("user_id").Int64()
+		if cfg.TelegramToken == "" || cfg.TelegramUserId == 0 {
+			return nil, fmt.Errorf("missing required configuration fields: TelegramToken, TelegramUserID")
+		}
 	}
 
 	// Parse email section
