@@ -35,7 +35,7 @@ type EmailClient struct {
 func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int, username string, password string) (*EmailClient, error) {
 
 	// Load last process UID
-
+	processedUIDFile = username
 	uid, err := loadLastProcessedUID(processedUIDFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load processed UIDs: %w", err)
@@ -46,7 +46,8 @@ func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int
 	serverAddr := fmt.Sprintf("%s:%d", imapHost, imapPort)
 	log.Printf("Try connecting to IMAP server: %s", serverAddr)
 
-	imap.RetryCount = 0
+	imap.RetryCount = 100
+	// imap.Verbose = true
 	c, err := imap.New(username, password, imapHost, imapPort)
 	if err != nil {
 		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
@@ -266,7 +267,7 @@ func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []int) ([]int, error) {
 	return uids, nil
 }
 
-const processedUIDFile = "last_processed_uid.txt"
+var processedUIDFile string
 
 func loadLastProcessedUID(filePath string) (int, error) {
 
@@ -301,7 +302,7 @@ func loadLastProcessedUID(filePath string) (int, error) {
 
 func saveLastProcessedUID(filePath string, uid int) error {
 
-	return os.WriteFile(filePath, []byte(fmt.Sprintf("%d\n", uid)), 0644)
+	return os.WriteFile(filePath, []byte(fmt.Sprintf("%d\n", uid)), 0600)
 
 }
 

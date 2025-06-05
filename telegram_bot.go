@@ -16,83 +16,64 @@ type TelegramBot struct {
 	api           *tgbotapi.BotAPI
 	allowedUserID int64
 	token         string
+	updates       tgbotapi.UpdatesChannel
 }
 
 func NewTelegramBot(apiToken string, allowedUserID int64) (*TelegramBot, error) {
-
 	bot, err := tgbotapi.NewBotAPI(apiToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Telegram bot API: %w", err)
 	}
-	// bot.Debug = true // Enable debug mode for more verbose output
 	log.Printf("Authorized on account %s", bot.Self.UserName)
 
-	return &TelegramBot{api: bot, allowedUserID: allowedUserID, token: apiToken}, nil
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
+	updates := bot.GetUpdatesChan(u)
+
+	return &TelegramBot{api: bot, allowedUserID: allowedUserID, token: apiToken, updates: updates}, nil
 }
 
 func (t *TelegramBot) StartListener(
 	replayMessage func(uid int, message string, files []struct{ Url, Name string }),
 	newMessage func(to string, title string, message string, files []struct{ Url, Name string }),
 ) {
-
-	updates := t.api.GetUpdatesChan(tgbotapi.UpdateConfig{
-		Timeout: 60,
-	})
-
-	for update := range updates {
+	for update := range t.updates {
 		t.handleUpdate(update, replayMessage, newMessage)
 	}
 }
 
-func (tb *TelegramBot) RequestPassword(prompt string) (string, error) {
+func (tb *TelegramBot) SendMessage(msg string) {
+	tb.api.Send(tgbotapi.NewMessage(tb.allowedUserID, msg))
+}
 
-	// Send message for user
-
+func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 	if tb.api == nil {
 		return "", errors.New("telegram API is not initialized")
 	}
+
 	msg := tgbotapi.NewMessage(tb.allowedUserID, prompt)
 	if _, err := tb.api.Send(msg); err != nil {
-		return "", fmt.Errorf("failed to send password prompt: %w", err)
+		return "", fmt.Errorf("failed to send: %w", err)
 	}
-	log.Printf("Sent password prompt to user ID %d: %s", tb.allowedUserID, prompt)
-
-	// Set a timeout for waiting for the password
+	log.Printf("Sent prompt to user ID %d: %s", tb.allowedUserID, prompt)
 
 	timeout := time.After(5 * time.Minute)
 
-	// Configure updates
-
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60 // Timeout for long polling
-
-	updates := tb.api.GetUpdatesChan(u)
-
-	log.Println("Waiting for password reply...")
 	for {
 		select {
-		case update := <-updates:
-			if update.Message == nil { // Ignore any non-Message updates
+		case update := <-tb.updates:
+			if update.Message == nil {
 				continue
 			}
-
-			// Check if the message is from the allowed user and chat
-
 			if update.Message.From.ID == tb.allowedUserID && update.Message.Chat.ID == tb.allowedUserID {
-				log.Printf("Received reply from user ID %d: %s", tb.allowedUserID, update.Message.Text)
-
-				// Clear any remaining updates in the channel to prevent processing old messages next time.
-
-				for len(updates) > 0 {
-					<-updates
-				}
+				log.Printf("Received reply: %s", update.Message.Text)
 				return update.Message.Text, nil
 			}
-			log.Printf("Ignoring message from unexpected user ID %d or chat ID %d", update.Message.From.ID, update.Message.Chat.ID)
+			log.Printf("Ignored message from user ID %d or chat ID %d", update.Message.From.ID, update.Message.Chat.ID)
 
 		case <-timeout:
-			log.Println("Timeout waiting for password reply.")
-			return "", errors.New("timeout waiting for password reply")
+			log.Println("Timeout waiting for input reply.")
+			return "", errors.New("timeout waiting for input reply")
 		}
 	}
 }

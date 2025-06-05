@@ -3,18 +3,13 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/mail"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/zalando/go-keyring"
+	"github.com/svanichkin/go-imap"
 )
-
-func check(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
 
 func main() {
 
@@ -31,33 +26,52 @@ func main() {
 
 	// Telegram init
 
-	telegramBot, err := NewTelegramBot(cfg.TelegramToken, cfg.TelegramUserID)
+	telegramBot, err := NewTelegramBot(cfg.TelegramToken, cfg.TelegramUserId)
 	if err != nil {
 		log.Fatalf("Failed to init Telegram bot: %v", err)
 	}
 
-	// Password from user or keychain
+	// User request for username if needed
 
-	emailPassword, err := keyring.Get("email2Telegram", cfg.EmailUsername)
-	if err != nil {
-		emailPassword, err = telegramBot.RequestPassword(
-			fmt.Sprintf("%s password?", cfg.EmailUsername),
-		)
+	email, password := cfg.GetCred()
+
+	for email == "" {
+		email, err = telegramBot.RequestUserInput("Enter your email please...")
 		if err != nil {
-			log.Fatalf("Failed to get password: %v", err)
+			log.Printf("Error getting username: %v", err)
+			continue
 		}
-		if err := keyring.Set("email2Telegram", cfg.EmailUsername, emailPassword); err != nil {
-			log.Printf("Warning: failed to save password to keyring: %v", err)
-		} else {
-			log.Println("Password saved to system keyring")
+		if _, err := mail.ParseAddress(email); err != nil {
+			telegramBot.SendMessage("Email not valid!")
+			email = ""
+			continue
 		}
-	} else {
-		log.Println("Password loaded from system keyring")
+		cfg.SetCred(email, password)
+	}
+
+	// User request for password if needed
+
+	for password == "" {
+		password, err = telegramBot.RequestUserInput(fmt.Sprintf("Enter your password for %s, please...", email))
+		if err != nil {
+			log.Printf("Error getting username: %v", err)
+			continue
+		}
+		imap.RetryCount = 0
+		c, err := imap.New(email, password, cfg.EmailImapHost, cfg.EmailImapPort)
+		if err != nil {
+			log.Printf("Failed to login to server: %v", err)
+			telegramBot.SendMessage("Wrong password!")
+			password = ""
+			continue
+		}
+		c.Close()
+		cfg.SetCred(email, password)
 	}
 
 	// Mail init
 
-	emailClient, err := NewEmailClient(cfg.EmailImapHost, cfg.EmailImapPort, cfg.EmailSmtpHost, cfg.EmailSmtpPort, cfg.EmailUsername, emailPassword)
+	emailClient, err := NewEmailClient(cfg.EmailImapHost, cfg.EmailImapPort, cfg.EmailSmtpHost, cfg.EmailSmtpPort, email, password)
 	if err != nil {
 		log.Fatalf("Failed to init email client: %v", err)
 	}
@@ -85,6 +99,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Email client error: %v", err)
 	}
+
+	processNewEmails(emailClient, telegramBot)
 
 	// Waiting signal OS
 
