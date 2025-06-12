@@ -235,7 +235,7 @@ func (t *TelegramBot) handleUpdate(
 			}
 			replyMessage(telehtml.DecodeIntInvisible(uidCode[0]), body, files)
 		}
-		log.Printf("Reply message received: %s", msg.Text)
+
 		return
 	}
 

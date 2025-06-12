@@ -28,11 +28,14 @@ type EmailClient struct {
 	smtpPort int
 	username string
 	password string
+
+	handler  *imap.IdleHandler
+	callback func()
 }
 
 // Lifecycle
 
-func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int, username string, password string) (*EmailClient, error) {
+func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int, username string, password string, callback func()) (*EmailClient, error) {
 
 	// Load last process UID
 	processedUIDFile = username
@@ -47,10 +50,22 @@ func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int
 	log.Printf("Try connecting to IMAP server: %s", serverAddr)
 
 	imap.RetryCount = 100
-	// imap.Verbose = true
 	c, err := imap.New(username, password, imapHost, imapPort)
 	if err != nil {
 		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
+	}
+
+	idleHandler := imap.IdleHandler{
+		OnExists: func(event imap.ExistsEvent) {
+			log.Println("[IDLE] New email arrived:", event.MessageIndex)
+			callback()
+		},
+		OnExpunge: func(event imap.ExpungeEvent) {
+			log.Println("[IDLE] Email expunged:", event.MessageIndex)
+		},
+		OnFetch: func(event imap.FetchEvent) {
+			log.Println("[IDLE] Email fetched:", event.MessageIndex, event.UID)
+		},
 	}
 
 	return &EmailClient{
@@ -64,6 +79,9 @@ func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int
 		smtpPort: smtpPort,
 		username: username,
 		password: password,
+
+		handler:  &idleHandler,
+		callback: callback,
 	}, nil
 
 }
@@ -100,50 +118,7 @@ func (ec *EmailClient) Close() {
 
 // Listener
 
-func (ec *EmailClient) RunUpdateChecker(callback func()) error {
-	var mu sync.Mutex
-	isProcessing := false
-	var idleHandler imap.IdleHandler
-	processNewEmailsSafe := func() {
-		mu.Lock()
-		if isProcessing {
-			mu.Unlock()
-			return
-		}
-		isProcessing = true
-		mu.Unlock()
-
-		go func() {
-			defer func() {
-				mu.Lock()
-				isProcessing = false
-				mu.Unlock()
-				if err := ec.startIdleWithHandler(&idleHandler); err != nil {
-					log.Printf("Failed to restart IDLE: %v", err)
-				}
-			}()
-
-			callback()
-		}()
-	}
-	idleHandler = imap.IdleHandler{
-		OnExists: func(event imap.ExistsEvent) {
-			log.Println("[IDLE] New email arrived:", event.MessageIndex)
-			ec.imap.StopIdle()
-			processNewEmailsSafe()
-		},
-		OnExpunge: func(event imap.ExpungeEvent) {
-			log.Println("[IDLE] Email expunged:", event.MessageIndex)
-		},
-		OnFetch: func(event imap.FetchEvent) {
-			log.Println("[IDLE] Email fetched:", event.MessageIndex, event.UID)
-		},
-	}
-
-	return ec.startIdleWithHandler(&idleHandler)
-}
-
-func (ec *EmailClient) startIdleWithHandler(handler *imap.IdleHandler) error {
+func (ec *EmailClient) startIdleWithHandler() error {
 
 	log.Println("(Re)starting IDLE mode")
 	folder := "INBOX"
@@ -151,7 +126,7 @@ func (ec *EmailClient) startIdleWithHandler(handler *imap.IdleHandler) error {
 		return err
 	}
 
-	return ec.imap.StartIdle(handler)
+	return ec.imap.StartIdle(ec.handler)
 }
 
 // Helpers
@@ -210,7 +185,7 @@ func (ec *EmailClient) ListNewMailUIDs() ([]int, error) {
 	if err := ec.selectFolder(folder); err != nil {
 		return nil, err
 	}
-	newUIDs, err := ec.imap.GetUIDs("UNDELETED")
+	newUIDs, err := ec.imap.GetUIDs("UID " + strconv.Itoa(ec.lastProcessedUID) + ":* UNDELETED")
 	if err != nil {
 		return nil, fmt.Errorf("UID search failed: %w", err)
 	}

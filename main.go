@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"github.com/svanichkin/go-imap"
@@ -70,7 +71,17 @@ func main() {
 
 	// Mail init
 
-	emailClient, err := NewEmailClient(cfg.EmailImapHost, cfg.EmailImapPort, cfg.EmailSmtpHost, cfg.EmailSmtpPort, email, password)
+	var emailClient *EmailClient
+	emailClient, err = NewEmailClient(
+		cfg.EmailImapHost,
+		cfg.EmailImapPort,
+		cfg.EmailSmtpHost,
+		cfg.EmailSmtpPort,
+		email,
+		password,
+		func() {
+			processNewEmails(emailClient, telegramBot)
+		})
 	if err != nil {
 		log.Fatalf("Failed to init email client: %v", err)
 	}
@@ -80,32 +91,19 @@ func main() {
 
 	go telegramBot.StartListener(
 		func(uid int, message string, files []struct{ Url, Name string }) {
-			err := emailClient.ReplyTo(uid, message, files)
-			if err != nil {
-				telegramBot.SendMessage("Failed to reply email for!")
-			}
+			replayToEmail(emailClient, telegramBot, uid, message, files)
 		},
 		func(to, title, message string, files []struct{ Url, Name string }) {
-			err := emailClient.SendMail([]string{to}, title, message, files)
-			if err != nil {
-				telegramBot.SendMessage("Failed to send email!")
-			}
+			sendNewEmail(emailClient, telegramBot, to, title, message, files)
 		},
 	)
+
+	processNewEmails(emailClient, telegramBot)
 
 	// Graceful shutdown
 
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
-
-	err = emailClient.RunUpdateChecker(func() {
-		processNewEmails(emailClient, telegramBot)
-	})
-	if err != nil {
-		log.Fatalf("Email client error: %v", err)
-	}
-
-	processNewEmails(emailClient, telegramBot)
 
 	// Waiting signal OS
 
@@ -113,7 +111,19 @@ func main() {
 	log.Println("Shutdown signal received")
 }
 
+var mu sync.Mutex
+
 func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot) {
+
+	mu.Lock()
+	emailClient.imap.StopIdle()
+	defer func() {
+		if err := emailClient.startIdleWithHandler(); err != nil {
+			telegramBot.SendMessage("Failed to reply email for!")
+			return
+		}
+		mu.Unlock()
+	}()
 
 	log.Println("Checking for new emails...")
 	uids, err := emailClient.ListNewMailUIDs()
@@ -144,6 +154,44 @@ func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot) {
 		if err := emailClient.MarkUIDAsProcessed(uid); err != nil {
 			log.Printf("Error marking email %d as processed: %v", uid, err)
 		}
+	}
+
+}
+
+func replayToEmail(emailClient *EmailClient, telegramBot *TelegramBot, uid int, message string, files []struct{ Url, Name string }) {
+
+	mu.Lock()
+	emailClient.imap.StopIdle()
+	defer func() {
+		if err := emailClient.startIdleWithHandler(); err != nil {
+			telegramBot.SendMessage("Failed to reply email for!")
+			return
+		}
+		mu.Unlock()
+	}()
+
+	err := emailClient.ReplyTo(uid, message, files)
+	if err != nil {
+		telegramBot.SendMessage("Failed to reply email for!")
+	}
+
+}
+
+func sendNewEmail(emailClient *EmailClient, telegramBot *TelegramBot, to, title, message string, files []struct{ Url, Name string }) {
+
+	mu.Lock()
+	emailClient.imap.StopIdle()
+	defer func() {
+		if err := emailClient.startIdleWithHandler(); err != nil {
+			telegramBot.SendMessage("Failed to send email!")
+			return
+		}
+		mu.Unlock()
+	}()
+
+	err := emailClient.SendMail([]string{to}, title, message, files)
+	if err != nil {
+		telegramBot.SendMessage("Failed to send email!")
 	}
 
 }
