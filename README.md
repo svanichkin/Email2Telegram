@@ -105,53 +105,6 @@ smtp_port = 587
         ```
     *   To include attachments, send the text message above first. Then, send the files (photos, documents, etc.) as separate messages immediately after. The application is designed to group media sent in quick succession. If you caption a file, ensure the main email text (recipient, subject, body) is sent as a distinct message.
 
-## Troubleshooting
-
-*   **"Failed to load config" / "Missing required configuration fields":**
-    *   Ensure `email2telegram.conf` is present in the same directory as the executable and contains valid `token` and `user_id`.
-    *   You can delete `email2telegram.conf` to re-trigger the interactive setup process.
-*   **Login Errors ("Failed to login to server", "Wrong password!"):**
-    *   Double-check your email address and password.
-    *   Verify your IMAP/SMTP server hostnames and ports in `email2telegram.conf`.
-    *   Check if your email provider requires an "App Password" (common for Gmail, Outlook, etc. if 2FA is enabled).
-    *   Ensure IMAP is enabled in your email account settings.
-*   **Keyring Issues ("failed set cred", "failed get cred from file"):**
-    *   The application attempts to use the system keyring. If it fails, it falls back to an encrypted file (`<YourTelegramUserID>.key`).
-    *   Ensure your system has a compatible keyring service running if you expect keyring integration (e.g., `gnome-keyring-daemon` on Linux, Windows Credential Manager, macOS Keychain).
-*   **Permissions:**
-    *   The application needs write permissions in its own directory to create/update `email2telegram.conf`, the `<userID>.key` fallback credential file, and a `<username_processed_uid.txt>` file (e.g. `user@example.com_processed_uid.txt`) that tracks the last processed email UID.
-*   **Emails not appearing / No new message notifications:**
-    *   Check the application's console output for any error messages.
-    *   Ensure your IMAP settings are correct and the account has new emails.
-    *   Verify the bot token and user ID are correct.
-
-## Security Considerations
-
-*   **Email Credentials:** Your email password is sensitive. Email2Telegram stores it in the system keyring by default, which is generally secure. The fallback AES-256 encrypted file offers good protection, but its security also depends on the security of the machine where the application runs and the derived encryption key.
-*   **Telegram Bot Token:** Your Telegram Bot Token is also highly sensitive. Protect it like a password. Anyone with your token can control your bot.
-*   **Allowed User ID:** The `user_id` in the configuration ensures that only you can interact with the bot and access your emails via Telegram.
-*   **Run on a Trusted Machine:** Run Email2Telegram on a secure and trusted machine.
-
-## Building from Source
-
-If you prefer to build Email2Telegram from source:
-
-1.  **Prerequisites:**
-    *   Go (version 1.23 or later, as specified in `go.mod`).
-    *   Git.
-2.  **Clone the repository:**
-    ```bash
-    # Replace with the actual repository URL:
-    # git clone https://github.com/username/repository.git
-    # cd repository
-    ```
-    (As I don't have the live repository URL, this step is for user guidance)
-3.  **Build the application:**
-    ```bash
-    go build -o email2telegram .
-    ```
-    This will create the `email2telegram` executable in the current directory.
-
 ## Contributing
 
 Contributions are welcome! Here are some ways you can help:
