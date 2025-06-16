@@ -97,7 +97,7 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 
 	// Send messages
 
-	log.Printf("Attempting to send main email message (Subject: %s) to chat ID %d", data.Subject, tb.allowedUserID)
+	// log.Printf("Attempting to send main email message (Subject: %s) to chat ID %d", data.Subject, tb.allowedUserID)
 	for i := range len(messages) {
 		msg := tgbotapi.NewMessage(tb.allowedUserID, messages[i]+telehtml.EncodeIntInvisible(data.Uid))
 		msg.ParseMode = "HTML"
@@ -115,7 +115,7 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	// Other Attachments
 
 	if len(data.Attachments) > 0 {
-		log.Printf("Attempting to send %d other attachments to chat ID %d", len(data.Attachments), tb.allowedUserID)
+		// log.Printf("Attempting to send %d other attachments to chat ID %d", len(data.Attachments), tb.allowedUserID)
 		for filename, contentBytes := range data.Attachments {
 			if len(contentBytes) == 0 {
 				log.Printf("Skipping attachment '%s' due to empty content.", filename)
