@@ -1,13 +1,12 @@
 module email_bot
 
-go 1.23.0
+go 1.24
 
-toolchain go1.23.9
+toolchain go1.24.3
 
 require (
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/svanichkin/TelegramHTML v1.1.0
-	github.com/svanichkin/go-imap v0.1.9
 	gopkg.in/ini.v1 v1.67.0
 )
 
@@ -38,6 +37,7 @@ require (
 )
 
 require (
+	github.com/BrianLeishman/go-imap v0.1.11
 	github.com/jhillyerd/enmime v1.3.0 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect

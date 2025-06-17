@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/svanichkin/go-imap"
-	"github.com/svanichkin/TelegramHTML"
+	"github.com/BrianLeishman/go-imap"
+	telehtml "github.com/svanichkin/TelegramHTML"
 )
 
 type ParsedEmailData struct {

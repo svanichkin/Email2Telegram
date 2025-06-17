@@ -10,7 +10,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/svanichkin/go-imap"
+	"github.com/BrianLeishman/go-imap"
 )
 
 func main() {

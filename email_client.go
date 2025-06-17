@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/svanichkin/go-imap"
+	"github.com/BrianLeishman/go-imap"
 )
 
 type EmailClient struct {
@@ -50,6 +50,7 @@ func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int
 	log.Printf("Try connecting to IMAP server: %s", serverAddr)
 
 	imap.RetryCount = 100
+	// imap.Verbose = true
 	c, err := imap.New(username, password, imapHost, imapPort)
 	if err != nil {
 		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
