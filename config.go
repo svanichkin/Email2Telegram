@@ -75,25 +75,23 @@ func LoadConfig(filePath string) (*Config, error) {
 	}
 
 	// Parse openai section (optional)
-	// Try to get the [openai] section from the embedded config first
+
 	openAISection, err := configFile.GetSection("openai")
-	if err == nil { // Section [openai] exists in embedded config
+	if err == nil {
 		if tokenKey, keyErr := openAISection.GetKey("token"); keyErr == nil {
 			cfg.OpenAIToken = tokenKey.String()
 		}
 	} else {
-		// Section [openai] NOT in embedded config, OR embedded config itself had an issue initially.
-		// Try loading from user's config file on disk.
 		configFilename := filePath
 		if !strings.HasSuffix(configFilename, ".conf") {
 			configFilename += ".conf"
 		}
 
-		if _, statErr := os.Stat(configFilename); statErr == nil { // Check if user's .conf file exists
-			diskConfigFile, loadErr := ini.Load(configFilename) // Try to load it
-			if loadErr == nil { // Loaded user's .conf file successfully
+		if _, statErr := os.Stat(configFilename); statErr == nil {
+			diskConfigFile, loadErr := ini.Load(configFilename)
+			if loadErr == nil {
 				openAISectionFromDisk, sectionErr := diskConfigFile.GetSection("openai")
-				if sectionErr == nil { // Section [openai] exists in disk config
+				if sectionErr == nil {
 					if tokenKey, keyErr := openAISectionFromDisk.GetKey("token"); keyErr == nil {
 						cfg.OpenAIToken = tokenKey.String()
 					}
@@ -101,8 +99,6 @@ func LoadConfig(filePath string) (*Config, error) {
 			}
 		}
 	}
-	// At this point, cfg.OpenAIToken is either populated or an empty string.
-	// No error is returned here if the token is missing or empty, making it optional.
 
 	// Parse email section
 

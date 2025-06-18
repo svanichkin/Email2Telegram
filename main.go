@@ -6,8 +6,7 @@ import (
 	"net/mail"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings" // Added for strings.TrimSpace
+	"path/filepath" // Added for strings.TrimSpace
 	"sync"
 	"syscall"
 
@@ -33,13 +32,12 @@ func main() {
 	}
 
 	// OpenAI Client init
-	var openAIClient *OpenAIClient // Declare openAIClient
+
+	var openAIClient *OpenAIClient
 	openAIClient, err = NewOpenAIClient(cfg.OpenAIToken)
 	if err != nil {
-		// This error should now only occur if NewOpenAIClient encounters an unexpected issue
-		// during client setup (e.g., issues with the openai library itself, not for an empty token).
 		log.Printf("Warning: Failed to initialize OpenAI client: %v. OpenAI features will be disabled.", err)
-		openAIClient = nil // Ensure it's nil if there was any error
+		openAIClient = nil
 	} else if openAIClient == nil {
 		log.Println("OpenAI token not provided or empty. OpenAI features will be disabled.")
 	} else {
@@ -105,11 +103,11 @@ func main() {
 	// Telegram listener
 
 	go telegramBot.StartListener(
-		func(uid int, message string, files []struct{ Url, Name string }) { // openAIClient removed from params
-			replayToEmail(emailClient, telegramBot, uid, message, files) // openAIClient removed from call
+		func(uid int, message string, files []struct{ Url, Name string }) {
+			replayToEmail(emailClient, telegramBot, uid, message, files)
 		},
-		func(to string, title string, message string, files []struct{ Url, Name string }) { // openAIClient removed from params
-			sendNewEmail(emailClient, telegramBot, to, title, message, files) // openAIClient removed from call
+		func(to string, title string, message string, files []struct{ Url, Name string }) {
+			sendNewEmail(emailClient, telegramBot, to, title, message, files)
 		},
 	)
 
@@ -162,30 +160,21 @@ func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot, openAI
 			log.Printf("Error fetching email %d: %v", uid, err)
 			continue
 		}
-		emailData := ParseEmail(mail, uid) // Ensure emailData is populated
+		emailData := ParseEmail(mail, uid)
 
-		if openAIClient != nil && emailData != nil && emailData.TextBody != "" { // Check if client exists and there's text to process
+		if openAIClient != nil && emailData != nil && emailData.TextBody != "" {
 			log.Printf("Attempting to process email UID %d with OpenAI...", uid)
-
-			// System prompt instructing the AI.
-			// The AI is asked to provide a summary and then include the original email.
-			systemPrompt := "You are a helpful assistant. Summarize the following email content concisely and professionally. After the summary, clearly label and include the full original email text. Format it like this:\n\nAI Summary:\n[Your concise summary here]\n\n-----\nOriginal Email:\n"
-
-			fullPrompt := systemPrompt + emailData.TextBody
-
-			model := "gpt-4o-mini" // As per issue requirement
-			temperature := 0.25   // As per issue requirement
-
-			processedBody, err := openAIClient.GenerateText(fullPrompt, model, float64(temperature))
+			result, err := openAIClient.GenerateTextFromEmail(emailData.Subject + " " + emailData.From + " " + emailData.TextBody)
 			if err != nil {
-				log.Printf("Error processing email UID %d with OpenAI: %v. Sending original email.", uid, err)
-				// No change to emailData.TextBody, original will be sent
-			} else if strings.TrimSpace(processedBody) == "" {
-				log.Printf("OpenAI returned an empty response for email UID %d. Sending original email.", uid)
-				// No change to emailData.TextBody, original will be sent
+				log.Printf("Failed to process email UID %d with OpenAI: %v. Sending original email.", uid, err)
+			} else if result.IsSpam {
+				emailData.Subject = "🚫 " + emailData.Subject
+				emailData.TextBody = result.Summary
+			} else if result.Code != "" {
+				emailData.Subject = "🔑 " + emailData.Subject
+				emailData.TextBody = result.Code
 			} else {
-				log.Printf("Successfully processed email UID %d with OpenAI. Updating TextBody.", uid)
-				emailData.TextBody = processedBody // Replace original body with AI-processed content
+				emailData.Subject = "✉️ " + emailData.Subject
 			}
 		}
 

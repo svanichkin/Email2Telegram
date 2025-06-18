@@ -2,57 +2,116 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
+
 	"github.com/sashabaranov/go-openai"
 )
 
-// OpenAIClient wraps the go-openai client.
 type OpenAIClient struct {
-	client *openai.Client
+	client       *openai.Client
+	systemPrompt string
 }
 
-// NewOpenAIClient creates a new OpenAI client.
-// If the token is empty, it returns a nil client and no error,
-// indicating that OpenAI features will be disabled.
 func NewOpenAIClient(token string) (*OpenAIClient, error) {
+
 	if token == "" {
-		return nil, nil // OpenAI features disabled, not an error for initialization itself.
+		return nil, nil
 	}
 	client := openai.NewClient(token)
-	// Optionally, a test request could be made here to validate the token
-	// and return an error if it's invalid. For now, we assume a non-empty token
-	// is potentially valid.
-	return &OpenAIClient{client: client}, nil
+
+	systemPrompt := `Проанализируй следующее письмо и определи, является ли оно спамом. Верни результат в формате JSON:
+
+- Если письмо спам, верни:
+  {
+    "is_spam": true,
+    "summary": "Краткое описание содержания"
+  }
+
+- Если письмо содержит код подтверждения или входа, верни:
+  {
+    "is_spam": false,
+    "code": "Код из письма"
+  }
+
+- Если письмо не спам и не содержит код, верни:
+  {
+    "is_spam": false
+  }
+
+Ты помощник, который кратко пересказывает email-сообщения на русском языке. Не добавляй ничего от себя.`
+
+	return &OpenAIClient{
+		client:       client,
+		systemPrompt: systemPrompt,
+	}, nil
 }
 
-// GenerateText generates text using the OpenAI API's chat completion.
-func (oac *OpenAIClient) GenerateText(prompt string, model string, temperature float64) (string, error) {
+type EmailAnalysisResult struct {
+	IsSpam  bool   `json:"is_spam"`
+	Summary string `json:"summary,omitempty"`
+	Code    string `json:"code,omitempty"`
+}
+
+func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysisResult, error) {
 	if oac.client == nil {
-		return "", errors.New("OpenAI client not initialized")
+		return nil, errors.New("OpenAI client not initialized")
+	}
+
+	if emailText == "" {
+		return nil, errors.New("email text is empty")
 	}
 
 	resp, err := oac.client.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
-			Model: model,
+			//Model: "gpt-4o-mini",
+			Model: "gpt-4.1",
 			Messages: []openai.ChatCompletionMessage{
 				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: oac.systemPrompt,
+				},
+				{
 					Role:    openai.ChatMessageRoleUser,
-					Content: prompt,
+					Content: emailText,
 				},
 			},
-			Temperature: float32(temperature), // Convert float64 to float32
+			Temperature: 0.25,
 		},
 	)
-
 	if err != nil {
-		return "", fmt.Errorf("OpenAI chat completion error: %w", err)
+		return nil, fmt.Errorf("OpenAI chat completion error: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {
-		return "", errors.New("OpenAI returned no choices")
+		return nil, errors.New("OpenAI returned no choices")
 	}
 
-	return resp.Choices[0].Message.Content, nil
+	content := cleanOpenAIResponse(resp.Choices[0].Message.Content)
+
+	var result EmailAnalysisResult
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse OpenAI response as JSON: %w\nResponse: %s", err, content)
+	}
+
+	return &result, nil
+}
+
+func cleanOpenAIResponse(resp string) string {
+	// Убираем тройные обратные кавычки с опциональным "json"
+	re := regexp.MustCompile("(?s)^```json\\s*(.*)\\s*```$|^```\\s*(.*)\\s*```$")
+	matches := re.FindStringSubmatch(resp)
+	if len(matches) > 0 {
+		for _, m := range matches[1:] {
+			if m != "" {
+				return m
+			}
+		}
+	}
+	// Если не матчится, возвращаем как есть, но без лишних пробелов
+	return strings.TrimSpace(resp)
 }

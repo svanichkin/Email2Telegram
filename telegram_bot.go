@@ -219,7 +219,6 @@ func (t *TelegramBot) handleUpdate(
 		isAllowedUser = true
 	}
 
-
 	if !isAllowedUser {
 		// If it's a group/channel message not from the allowed user (or not sent on their behalf in a relevant way)
 		// or a direct message from an unauthorized user.
@@ -251,7 +250,7 @@ func (t *TelegramBot) handleUpdate(
 				for _, m := range msgs {
 					files = append(files, t.getAllFileURLs(m)...)
 				}
-				replyMessage(telehtml.DecodeIntInvisible(uidCode[0]), extractTextFromMessages(msgs), files)
+				replayMessage(telehtml.DecodeIntInvisible(uidCode[0]), extractTextFromMessages(msgs), files)
 			}) {
 				return
 			}
@@ -263,7 +262,7 @@ func (t *TelegramBot) handleUpdate(
 			if body == "" {
 				body = msg.Caption
 			}
-			replyMessage(telehtml.DecodeIntInvisible(uidCode[0]), body, files)
+			replayMessage(telehtml.DecodeIntInvisible(uidCode[0]), body, files)
 		}
 
 		return
