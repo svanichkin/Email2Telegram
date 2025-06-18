@@ -28,6 +28,7 @@ type Config struct {
 	EmailSmtpPort        int    `ini:"smtp_port"`
 	TelegramToken        string `ini:"token"`
 	TelegramUserId       int64  `ini:"user_id"`
+	OpenAIToken          string `ini:"token"`
 	CheckIntervalSeconds int    `ini:"check_interval_seconds"`
 }
 
@@ -72,6 +73,36 @@ func LoadConfig(filePath string) (*Config, error) {
 			return nil, fmt.Errorf("missing required configuration fields: TelegramToken, TelegramUserID")
 		}
 	}
+
+	// Parse openai section (optional)
+	// Try to get the [openai] section from the embedded config first
+	openAISection, err := configFile.GetSection("openai")
+	if err == nil { // Section [openai] exists in embedded config
+		if tokenKey, keyErr := openAISection.GetKey("token"); keyErr == nil {
+			cfg.OpenAIToken = tokenKey.String()
+		}
+	} else {
+		// Section [openai] NOT in embedded config, OR embedded config itself had an issue initially.
+		// Try loading from user's config file on disk.
+		configFilename := filePath
+		if !strings.HasSuffix(configFilename, ".conf") {
+			configFilename += ".conf"
+		}
+
+		if _, statErr := os.Stat(configFilename); statErr == nil { // Check if user's .conf file exists
+			diskConfigFile, loadErr := ini.Load(configFilename) // Try to load it
+			if loadErr == nil { // Loaded user's .conf file successfully
+				openAISectionFromDisk, sectionErr := diskConfigFile.GetSection("openai")
+				if sectionErr == nil { // Section [openai] exists in disk config
+					if tokenKey, keyErr := openAISectionFromDisk.GetKey("token"); keyErr == nil {
+						cfg.OpenAIToken = tokenKey.String()
+					}
+				}
+			}
+		}
+	}
+	// At this point, cfg.OpenAIToken is either populated or an empty string.
+	// No error is returned here if the token is missing or empty, making it optional.
 
 	// Parse email section
 

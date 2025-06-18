@@ -196,7 +196,7 @@ func (t *TelegramBot) getAllFileURLs(msg *tgbotapi.Message) []struct{ Url, Name 
 
 func (t *TelegramBot) handleUpdate(
 	update tgbotapi.Update,
-	replyMessage func(uid int, message string, files []struct{ Url, Name string }),
+	replayMessage func(uid int, message string, files []struct{ Url, Name string }),
 	newMessage func(to string, title string, message string, files []struct{ Url, Name string }),
 ) {
 
@@ -204,9 +204,39 @@ func (t *TelegramBot) handleUpdate(
 		return
 	}
 	msg := update.Message
-	if msg.From.ID != t.allowedUserID {
+
+	// Check if the message is from the allowed user
+	// This logic needs to account for messages sent by the user directly,
+	// or messages the user sends "as" a channel/group if the bot is in such a chat.
+	isAllowedUser := false
+	if msg.From != nil && msg.From.ID == t.allowedUserID {
+		isAllowedUser = true
+	} else if msg.SenderChat != nil && msg.SenderChat.ID == t.allowedUserID && msg.Chat.ID == t.allowedUserID {
+		// This case can happen if the user is posting as a channel in a chat with the bot,
+		// or if the user is interacting with the bot in a channel where the bot is an admin.
+		// We also check msg.Chat.ID to ensure it's the direct chat with the user,
+		// effectively meaning the user is sending "as themselves" via SenderChat.
+		isAllowedUser = true
+	}
+
+
+	if !isAllowedUser {
+		// If it's a group/channel message not from the allowed user (or not sent on their behalf in a relevant way)
+		// or a direct message from an unauthorized user.
+		// Log and ignore.
+		fromID := int64(0)
+		if msg.From != nil {
+			fromID = msg.From.ID
+		}
+		senderChatID := int64(0)
+		if msg.SenderChat != nil {
+			senderChatID = msg.SenderChat.ID
+		}
+		log.Printf("Ignoring message: From.ID=%d, SenderChat.ID=%d, Chat.ID=%d. Allowed UserID: %d", fromID, senderChatID, msg.Chat.ID, t.allowedUserID)
 		return
 	}
+
+	// Command handling removed from here
 
 	// Reply message
 
