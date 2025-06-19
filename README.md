@@ -11,6 +11,7 @@
 *   **Real-time Notifications:** Utilizes IMAP IDLE for instant notifications of new emails, ensuring you stay updated.
 *   **Secure Credential Storage:** Protects your email credentials by storing them in your system's keyring (e.g., macOS Keychain, GNOME Keyring, Windows Credential Manager) with a fallback to an AES-256 encrypted file if keyring access is unavailable.
 *   **Configuration File:** Simple and clear configuration via an `email2telegram.conf` file.
+*   **Optional AI-Powered Processing:** Leverage OpenAI to automatically detect spam or extract codes from emails (requires OpenAI API token).
 *   **Cross-Platform:** Pre-compiled binaries are available for Linux, macOS, and Windows (amd64 & arm64 architectures) via GitHub Releases.
 *   **HTML Email Handling:** Parses HTML emails and attempts to convert them to Telegram-friendly HTML formatting.
 *   **Graceful Shutdown:** Handles termination signals cleanly.
@@ -82,6 +83,25 @@ smtp_port = 587
     *   `smtp_host`: (Optional) Your SMTP server hostname (e.g., `smtp.gmail.com`). If left blank, the application will try to derive it from your email domain.
     *   `smtp_port`: (Optional) Your SMTP server port. Defaults to `587` (for SMTP with STARTTLS).
     *   `username`: (Optional) Your full email address. If not provided here, and not found in the keyring from a previous run, you will be prompted for it when the application starts.
+
+### Advanced Email Processing with OpenAI
+
+Email2Telegram can leverage OpenAI's powerful language models to provide advanced processing features for your emails, such as:
+
+*   **Spam Detection:** Help identify and flag potential spam messages.
+*   **Code Extraction:** Automatically extract verification codes or other short codes often sent by services and banks.
+
+To enable these features, you need to provide an OpenAI API token:
+
+1.  Obtain an API token from your [OpenAI Platform account](https://platform.openai.com/account/api-keys).
+2.  Add or uncomment the `[openai]` section in your `email2telegram.conf` file and enter your token:
+
+    ```ini
+    [openai]
+    token = YOUR_OPEN_AI_TOKEN
+    ```
+
+**Note:** Using OpenAI features may incur costs depending on your OpenAI usage and pricing plan. Please refer to OpenAI's pricing information for details.
 
 **Note on Email Providers (Gmail, Outlook, etc.):**
 *   You might need to enable IMAP access in your email account settings.
