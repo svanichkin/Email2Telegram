@@ -19,7 +19,22 @@ import (
 )
 
 //go:embed email2telegram.conf
-var configContent []byte
+var configContent = []byte(`[email]
+# host = example.com
+# host_imap = imap.example.com
+# host_smtp = smtp.example.com
+# imap_port = 993
+# smtp_port = 587
+# username = user@example.com
+
+[telegram]
+#token = YOUR_TELEGRAM_BOT_TOKEN
+#user_id = YOUR_TELEGRAM_USER_ID_AS_INTEGER
+#chat_id = YOUR_TELEGRAM_CHAT_ID_AS_INTEGER
+
+[openai]
+#token = YOUR_OPEN_AI_TOKEN
+`)
 
 type Config struct {
 	EmailImapHost        string `ini:"imap_host"`
@@ -28,6 +43,7 @@ type Config struct {
 	EmailSmtpPort        int    `ini:"smtp_port"`
 	TelegramToken        string `ini:"token"`
 	TelegramUserId       int64  `ini:"user_id"`
+	TelegramChatID       int64  `ini:"chat_id"`
 	OpenAIToken          string `ini:"token"`
 	CheckIntervalSeconds int    `ini:"check_interval_seconds"`
 }
@@ -47,7 +63,8 @@ func LoadConfig(filePath string) (*Config, error) {
 
 	cfg.TelegramToken = configFile.Section("telegram").Key("token").String()
 	cfg.TelegramUserId, _ = configFile.Section("telegram").Key("user_id").Int64()
-	if cfg.TelegramToken == "" || cfg.TelegramUserId == 0 {
+	cfg.TelegramChatID, _ = configFile.Section("telegram").Key("chat_id").Int64()
+	if cfg.TelegramToken == "" || (cfg.TelegramUserId == 0 && cfg.TelegramChatID == 0) {
 
 		// Create new conf from template
 
@@ -58,7 +75,7 @@ func LoadConfig(filePath string) (*Config, error) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to write config to disk: %w", err)
 			}
-			return nil, fmt.Errorf("missing required configuration fields: TelegramToken, TelegramUserID")
+			return nil, fmt.Errorf("missing required configuration fields: TelegramToken and one of TelegramUserID or TelegramChatID")
 		}
 
 		// Or load from disk
@@ -69,8 +86,9 @@ func LoadConfig(filePath string) (*Config, error) {
 		}
 		cfg.TelegramToken = configFile.Section("telegram").Key("token").String()
 		cfg.TelegramUserId, _ = configFile.Section("telegram").Key("user_id").Int64()
-		if cfg.TelegramToken == "" || cfg.TelegramUserId == 0 {
-			return nil, fmt.Errorf("missing required configuration fields: TelegramToken, TelegramUserID")
+		cfg.TelegramChatID, _ = configFile.Section("telegram").Key("chat_id").Int64()
+		if cfg.TelegramToken == "" || (cfg.TelegramUserId == 0 && cfg.TelegramChatID == 0) {
+			return nil, fmt.Errorf("missing required configuration fields: TelegramToken and one of TelegramUserID or TelegramChatID")
 		}
 	}
 

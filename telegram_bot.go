@@ -14,12 +14,12 @@ import (
 
 type TelegramBot struct {
 	api           *tgbotapi.BotAPI
-	allowedUserID int64
+	recipientID   int64
 	token         string
 	updates       tgbotapi.UpdatesChannel
 }
 
-func NewTelegramBot(apiToken string, allowedUserID int64) (*TelegramBot, error) {
+func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
 	bot, err := tgbotapi.NewBotAPI(apiToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Telegram bot API: %w", err)
@@ -30,7 +30,7 @@ func NewTelegramBot(apiToken string, allowedUserID int64) (*TelegramBot, error) 
 	u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
 
-	return &TelegramBot{api: bot, allowedUserID: allowedUserID, token: apiToken, updates: updates}, nil
+	return &TelegramBot{api: bot, recipientID: recipientID, token: apiToken, updates: updates}, nil
 }
 
 func (t *TelegramBot) StartListener(
@@ -43,7 +43,7 @@ func (t *TelegramBot) StartListener(
 }
 
 func (tb *TelegramBot) SendMessage(msg string) {
-	tb.api.Send(tgbotapi.NewMessage(tb.allowedUserID, msg))
+	tb.api.Send(tgbotapi.NewMessage(tb.recipientID, msg))
 }
 
 func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
@@ -51,11 +51,11 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 		return "", errors.New("telegram API is not initialized")
 	}
 
-	msg := tgbotapi.NewMessage(tb.allowedUserID, prompt)
+	msg := tgbotapi.NewMessage(tb.recipientID, prompt)
 	if _, err := tb.api.Send(msg); err != nil {
 		return "", fmt.Errorf("failed to send: %w", err)
 	}
-	log.Printf("Sent prompt to user ID %d: %s", tb.allowedUserID, prompt)
+	log.Printf("Sent prompt to recipient ID %d: %s", tb.recipientID, prompt)
 
 	timeout := time.After(5 * time.Minute)
 
@@ -65,11 +65,13 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 			if update.Message == nil {
 				continue
 			}
-			if update.Message.From.ID == tb.allowedUserID && update.Message.Chat.ID == tb.allowedUserID {
+			// Accept input if the message is from the recipient chat/user.
+			// Further From.ID filtering within a group for RequestUserInput would be a new feature.
+			if update.Message.Chat.ID == tb.recipientID {
 				log.Printf("Received reply: %s", update.Message.Text)
 				return update.Message.Text, nil
 			}
-			log.Printf("Ignored message from user ID %d or chat ID %d", update.Message.From.ID, update.Message.Chat.ID)
+			log.Printf("RequestUserInput: Ignored message in chat %d from user %d (expected chat %d)", update.Message.Chat.ID, update.Message.From.ID, tb.recipientID)
 
 		case <-timeout:
 			log.Println("Timeout waiting for input reply.")
@@ -97,9 +99,9 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 
 	// Send messages
 
-	// log.Printf("Attempting to send main email message (Subject: %s) to chat ID %d", data.Subject, tb.allowedUserID)
+	// log.Printf("Attempting to send main email message (Subject: %s) to recipient ID %d", data.Subject, tb.recipientID)
 	for i := range len(messages) {
-		msg := tgbotapi.NewMessage(tb.allowedUserID, messages[i]+telehtml.EncodeIntInvisible(data.Uid))
+		msg := tgbotapi.NewMessage(tb.recipientID, messages[i]+telehtml.EncodeIntInvisible(data.Uid))
 		msg.ParseMode = "HTML"
 		msg.DisableWebPagePreview = true
 		if _, err := tb.api.Send(msg); err != nil {
@@ -115,14 +117,14 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 	// Other Attachments
 
 	if len(data.Attachments) > 0 {
-		// log.Printf("Attempting to send %d other attachments to chat ID %d", len(data.Attachments), tb.allowedUserID)
+		// log.Printf("Attempting to send %d other attachments to recipient ID %d", len(data.Attachments), tb.recipientID)
 		for filename, contentBytes := range data.Attachments {
 			if len(contentBytes) == 0 {
 				log.Printf("Skipping attachment '%s' due to empty content.", filename)
 				continue
 			}
 			attachmentFile := tgbotapi.FileBytes{Name: filename, Bytes: contentBytes}
-			docMsg := tgbotapi.NewDocument(tb.allowedUserID, attachmentFile)
+			docMsg := tgbotapi.NewDocument(tb.recipientID, attachmentFile)
 			log.Printf("Sending attachment: %s (size: %d bytes)", filename, len(contentBytes))
 			if _, err := tb.api.Send(docMsg); err != nil {
 				log.Printf("Error sending attachment '%s': %v", filename, err)
@@ -205,24 +207,14 @@ func (t *TelegramBot) handleUpdate(
 	}
 	msg := update.Message
 
-	// Check if the message is from the allowed user
-	// This logic needs to account for messages sent by the user directly,
-	// or messages the user sends "as" a channel/group if the bot is in such a chat.
-	isAllowedUser := false
-	if msg.From != nil && msg.From.ID == t.allowedUserID {
-		isAllowedUser = true
-	} else if msg.SenderChat != nil && msg.SenderChat.ID == t.allowedUserID && msg.Chat.ID == t.allowedUserID {
-		// This case can happen if the user is posting as a channel in a chat with the bot,
-		// or if the user is interacting with the bot in a channel where the bot is an admin.
-		// We also check msg.Chat.ID to ensure it's the direct chat with the user,
-		// effectively meaning the user is sending "as themselves" via SenderChat.
-		isAllowedUser = true
+	if msg.Chat == nil { // Should not happen for normal messages
+		log.Printf("Ignoring update with nil Chat: UpdateID %d", update.UpdateID)
+		return
 	}
 
-	if !isAllowedUser {
-		// If it's a group/channel message not from the allowed user (or not sent on their behalf in a relevant way)
-		// or a direct message from an unauthorized user.
-		// Log and ignore.
+	// The primary check: is the message from the configured chat/user?
+	if msg.Chat.ID != t.recipientID {
+		// Log details for diagnostics
 		fromID := int64(0)
 		if msg.From != nil {
 			fromID = msg.From.ID
@@ -231,9 +223,18 @@ func (t *TelegramBot) handleUpdate(
 		if msg.SenderChat != nil {
 			senderChatID = msg.SenderChat.ID
 		}
-		log.Printf("Ignoring message: From.ID=%d, SenderChat.ID=%d, Chat.ID=%d. Allowed UserID: %d", fromID, senderChatID, msg.Chat.ID, t.allowedUserID)
+		log.Printf("Ignoring message from unexpected chat: MessageChat.ID=%d, From.ID=%d, SenderChat.ID=%d. Expected recipientID: %d", msg.Chat.ID, fromID, senderChatID, t.recipientID)
 		return
 	}
+
+	// At this point, the message is in the correct chat (either DM or the configured group).
+	// The original issue implies that if chat_id is used, any user in that chat can interact.
+	// If user_id was used for a DM, msg.Chat.ID == t.recipientID is sufficient.
+	// No further From.ID check is strictly needed here based on the issue's requirements for group mode.
+	// If cfg.TelegramUserId is set (even in group mode, for potential admin actions not covered here),
+	// that check could be added *within* specific command handlers if needed, not as a global filter.
+
+	log.Printf("Processing message from Chat.ID %d (RecipientID: %d), From.ID %d", msg.Chat.ID, t.recipientID, msg.From.ID)
 
 	// Command handling removed from here
 
