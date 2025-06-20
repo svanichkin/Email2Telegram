@@ -24,9 +24,26 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	// Determine recipientID for Telegram bot
+	var recipientID int64
+	if cfg.TelegramChatID != 0 {
+		recipientID = cfg.TelegramChatID
+		log.Printf("Operating in group chat mode. Chat ID: %d", recipientID)
+		if cfg.TelegramUserId != 0 {
+			log.Printf("Note: Telegram UserID (%d) is also set in config, but ChatID (%d) takes precedence for bot operations.", cfg.TelegramUserId, cfg.TelegramChatID)
+		}
+	} else if cfg.TelegramUserId != 0 {
+		recipientID = cfg.TelegramUserId
+		log.Printf("Operating in direct user message mode. User ID: %d", recipientID)
+	} else {
+		// This case should ideally be caught by LoadConfig if the token is present,
+		// as LoadConfig validates that at least one ID is present if the token is.
+		log.Fatalf("Critical configuration error: Neither Telegram UserID nor ChatID is set after config load. Token presence: %t", cfg.TelegramToken != "")
+	}
+
 	// Telegram init
 
-	telegramBot, err := NewTelegramBot(cfg.TelegramToken, cfg.TelegramUserId)
+	telegramBot, err := NewTelegramBot(cfg.TelegramToken, recipientID)
 	if err != nil {
 		log.Fatalf("Failed to init Telegram bot: %v", err)
 	}
