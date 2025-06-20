@@ -25,6 +25,7 @@ func main() {
 	}
 
 	// Determine recipientID for Telegram bot
+
 	var recipientID int64
 	if cfg.TelegramChatID != 0 {
 		recipientID = cfg.TelegramChatID
@@ -36,8 +37,6 @@ func main() {
 		recipientID = cfg.TelegramUserId
 		log.Printf("Operating in direct user message mode. User ID: %d", recipientID)
 	} else {
-		// This case should ideally be caught by LoadConfig if the token is present,
-		// as LoadConfig validates that at least one ID is present if the token is.
 		log.Fatalf("Critical configuration error: Neither Telegram UserID nor ChatID is set after config load. Token presence: %t", cfg.TelegramToken != "")
 	}
 
@@ -179,6 +178,7 @@ func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot, openAI
 		}
 		emailData := ParseEmail(mail, uid)
 
+		isCode := false
 		if openAIClient != nil && emailData != nil && emailData.TextBody != "" {
 			log.Printf("Attempting to process email UID %d with OpenAI...", uid)
 			result, err := openAIClient.GenerateTextFromEmail(emailData.Subject + " " + emailData.From + " " + emailData.TextBody)
@@ -188,6 +188,7 @@ func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot, openAI
 				emailData.Subject = "🚫 " + emailData.Subject
 				emailData.TextBody = result.Summary
 			} else if result.Code != "" {
+				isCode = true
 				emailData.Subject = "🔑 " + emailData.Subject
 				emailData.TextBody = result.Code
 			} else {
@@ -195,7 +196,7 @@ func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot, openAI
 			}
 		}
 
-		if err := telegramBot.SendEmailData(emailData); err != nil {
+		if err := telegramBot.SendEmailData(emailData, isCode); err != nil {
 			log.Printf("Error sending email %d to Telegram: %v", uid, err)
 			continue
 		}

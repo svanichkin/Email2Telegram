@@ -19,22 +19,7 @@ import (
 )
 
 //go:embed email2telegram.conf
-var configContent = []byte(`[email]
-# host = example.com
-# host_imap = imap.example.com
-# host_smtp = smtp.example.com
-# imap_port = 993
-# smtp_port = 587
-# username = user@example.com
-
-[telegram]
-#token = YOUR_TELEGRAM_BOT_TOKEN
-#user_id = YOUR_TELEGRAM_USER_ID_AS_INTEGER
-#chat_id = YOUR_TELEGRAM_CHAT_ID_AS_INTEGER
-
-[openai]
-#token = YOUR_OPEN_AI_TOKEN
-`)
+var configContent []byte
 
 type Config struct {
 	EmailImapHost        string `ini:"imap_host"`

@@ -13,10 +13,10 @@ import (
 )
 
 type TelegramBot struct {
-	api           *tgbotapi.BotAPI
-	recipientID   int64
-	token         string
-	updates       tgbotapi.UpdatesChannel
+	api         *tgbotapi.BotAPI
+	recipientID int64
+	token       string
+	updates     tgbotapi.UpdatesChannel
 }
 
 func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
@@ -65,8 +65,6 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 			if update.Message == nil {
 				continue
 			}
-			// Accept input if the message is from the recipient chat/user.
-			// Further From.ID filtering within a group for RequestUserInput would be a new feature.
 			if update.Message.Chat.ID == tb.recipientID {
 				log.Printf("Received reply: %s", update.Message.Text)
 				return update.Message.Text, nil
@@ -80,7 +78,7 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 	}
 }
 
-func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
+func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode bool) error {
 
 	if tb.api == nil {
 		return errors.New("telegram API is not initialized")
@@ -91,15 +89,46 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData) error {
 
 	var cumulativeError error
 
-	// Header + text, then split
+	// if code message
 
 	var messages []string
-	text := "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n" + data.TextBody
+	var text string
+	if isCode {
+		text = "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>"
+
+		msg := tgbotapi.NewMessage(tb.recipientID, text+telehtml.EncodeIntInvisible(data.Uid))
+		msg.ParseMode = "HTML"
+		msg.DisableWebPagePreview = true
+		if _, err := tb.api.Send(msg); err != nil {
+			log.Printf("Error sending title message: %v", err)
+			if cumulativeError == nil {
+				cumulativeError = fmt.Errorf("failed to send title message: %w", err)
+			} else {
+				cumulativeError = fmt.Errorf("%v; failed to send title message: %w", cumulativeError, err)
+			}
+		}
+
+		msg = tgbotapi.NewMessage(tb.recipientID, data.TextBody+telehtml.EncodeIntInvisible(data.Uid))
+		if _, err := tb.api.Send(msg); err != nil {
+			log.Printf("Error sending code message: %v", err)
+			if cumulativeError == nil {
+				cumulativeError = fmt.Errorf("failed to send code message: %w", err)
+			} else {
+				cumulativeError = fmt.Errorf("%v; failed to send code message: %w", cumulativeError, err)
+			}
+		}
+
+		return cumulativeError
+
+	}
+
+	// Header + text, then split
+
+	text = "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n" + data.TextBody
 	messages = telehtml.SplitTelegramHTML(text)
 
 	// Send messages
 
-	// log.Printf("Attempting to send main email message (Subject: %s) to recipient ID %d", data.Subject, tb.recipientID)
 	for i := range len(messages) {
 		msg := tgbotapi.NewMessage(tb.recipientID, messages[i]+telehtml.EncodeIntInvisible(data.Uid))
 		msg.ParseMode = "HTML"
