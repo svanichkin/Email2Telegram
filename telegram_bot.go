@@ -169,6 +169,42 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode bool) error {
 	return cumulativeError
 }
 
+func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) error {
+	if tb.api == nil {
+		return errors.New("telegram API is not initialized in CheckAndRequestAdminRights")
+	}
+
+	// Get bot's own ID
+	botID := tb.api.Self.ID
+
+	// Get chat member information for the bot in the specified chat
+	chatMember, err := tb.api.GetChatMember(tgbotapi.ChatMemberConfig{
+		ChatID: chatID,
+		UserID: botID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get chat member info for bot %d in chat %d: %w", botID, chatID, err)
+	}
+
+	// Check if the bot is an administrator or creator
+	// Common statuses: "creator", "administrator", "member", "restricted", "left", "kicked"
+	status := chatMember.Status
+	log.Printf("Bot status in chat %d is: %s", chatID, status)
+
+	if status != "administrator" && status != "creator" {
+		messageText := "Для корректной работы мне необходимы права администратора в этом групповом чате. Пожалуйста, предоставьте их." // "For correct operation, I need administrator rights in this group chat. Please provide them."
+		msg := tgbotapi.NewMessage(chatID, messageText)
+		if _, sendErr := tb.api.Send(msg); sendErr != nil {
+			return fmt.Errorf("failed to send admin rights request message to chat %d: %w", chatID, sendErr)
+		}
+		log.Printf("Sent admin rights request to chat %d", chatID)
+	} else {
+		log.Printf("Bot already has admin rights in chat %d (status: %s)", chatID, status)
+	}
+
+	return nil
+}
+
 // Events from user
 
 type FileAttachment struct {
