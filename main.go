@@ -47,6 +47,20 @@ func main() {
 		log.Fatalf("Failed to init Telegram bot: %v", err)
 	}
 
+	if cfg.TelegramChatID != 0 {
+		// Call a new method on telegramBot that we will define in telegram_bot.go
+		// This method will check for admin rights and send a message if needed.
+		// We'll pass the chat ID to it.
+		log.Printf("Checking admin rights for bot in group chat ID: %d", cfg.TelegramChatID)
+		err := telegramBot.CheckAndRequestAdminRights(cfg.TelegramChatID)
+		if err != nil {
+			log.Printf("Error during CheckAndRequestAdminRights: %v", err)
+			// Depending on the severity or desired behavior, you might choose to
+			// send a message to the user/group or handle it differently.
+			// For now, just logging.
+		}
+	}
+
 	// OpenAI Client init
 
 	var openAIClient *OpenAIClient
