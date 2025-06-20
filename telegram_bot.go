@@ -17,6 +17,7 @@ type TelegramBot struct {
 	recipientID int64
 	token       string
 	updates     tgbotapi.UpdatesChannel
+	topicCheckCompletedForChat map[int64]bool
 }
 
 func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
@@ -30,7 +31,13 @@ func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
 	u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
 
-	return &TelegramBot{api: bot, recipientID: recipientID, token: apiToken, updates: updates}, nil
+	return &TelegramBot{
+		api: bot,
+		recipientID: recipientID,
+		token: apiToken,
+		updates: updates,
+		topicCheckCompletedForChat: make(map[int64]bool),
+	}, nil
 }
 
 func (t *TelegramBot) StartListener(
@@ -205,6 +212,32 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) error {
 	return nil
 }
 
+// CheckTopicsEnabled checks if topics are enabled (i.e., the chat is a forum).
+func (tb *TelegramBot) CheckTopicsEnabled(chatID int64) (bool, error) {
+	if tb.api == nil {
+		return false, errors.New("telegram API is not initialized in CheckTopicsEnabled")
+	}
+
+	chat, err := tb.api.GetChat(tgbotapi.ChatInfoConfig{ChatID: chatID})
+	if err != nil {
+		log.Printf("Error getting chat info for chat ID %d: %v", chatID, err)
+		return false, fmt.Errorf("failed to get chat info: %w", err)
+	}
+
+	// TODO: Verify if 'IsForum' is the correct field.
+	// For now, if the field doesn't exist or is false, we assume topics are not enabled.
+	// Depending on the library version, this might be under a different name or a chat configuration.
+	log.Printf("Checking if topics are enabled for chat ID %d. Chat type: %s, IsForum: %t", chatID, chat.Type, chat.IsForum)
+
+	if chat.IsForum {
+		log.Printf("Topics are enabled for chat ID %d", chatID)
+		return true, nil
+	}
+
+	log.Printf("Topics are NOT enabled for chat ID %d (IsForum: %t)", chatID, chat.IsForum)
+	return false, nil
+}
+
 // Events from user
 
 type FileAttachment struct {
@@ -300,6 +333,23 @@ func (t *TelegramBot) handleUpdate(
 	// that check could be added *within* specific command handlers if needed, not as a global filter.
 
 	log.Printf("Processing message from Chat.ID %d (RecipientID: %d), From.ID %d", msg.Chat.ID, t.recipientID, msg.From.ID)
+
+	// Check if topics are enabled for groups/supergroups, once per session
+	if (msg.Chat.IsGroup() || msg.Chat.IsSuperGroup()) && !t.topicCheckCompletedForChat[msg.Chat.ID] {
+		topicsEnabled, err := t.CheckTopicsEnabled(msg.Chat.ID)
+		if err != nil {
+			log.Printf("Error checking topics for chat ID %d: %v", msg.Chat.ID, err)
+		} else if !topicsEnabled {
+			notificationText := "В этой группе не включены темы. Пожалуйста, включите их для корректной работы."
+			notificationMsg := tgbotapi.NewMessage(msg.Chat.ID, notificationText)
+			if _, sendErr := t.api.Send(notificationMsg); sendErr != nil {
+				log.Printf("Error sending 'topics not enabled' notification to chat ID %d: %v", msg.Chat.ID, sendErr)
+			} else {
+				log.Printf("Sent 'topics not enabled' notification to chat ID %d.", msg.Chat.ID)
+			}
+		}
+		t.topicCheckCompletedForChat[msg.Chat.ID] = true // Mark check as completed for this chat session
+	}
 
 	// Command handling removed from here
 
