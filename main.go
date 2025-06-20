@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/BrianLeishman/go-imap"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func main() {
@@ -58,6 +59,23 @@ func main() {
 			// Depending on the severity or desired behavior, you might choose to
 			// send a message to the user/group or handle it differently.
 			// For now, just logging.
+		}
+
+		log.Printf("Checking if topics are enabled for chat ID %d during startup...", cfg.TelegramChatID)
+		topicsEnabled, err := telegramBot.CheckTopicsEnabled(cfg.TelegramChatID)
+		if err != nil {
+			log.Printf("Error checking topics for chat ID %d during startup: %v", cfg.TelegramChatID, err)
+		} else if !topicsEnabled {
+			log.Printf("Topics are not enabled for chat ID %d. Sending notification.", cfg.TelegramChatID)
+			notificationText := "В этой группе не включены темы. Пожалуйста, включите их для корректной работы."
+			notificationMsg := tgbotapi.NewMessage(cfg.TelegramChatID, notificationText)
+			if _, sendErr := telegramBot.api.Send(notificationMsg); sendErr != nil { // Note: telegramBot.api is used here
+				log.Printf("Failed to send 'topics not enabled' notification to chat ID %d during startup: %v", cfg.TelegramChatID, sendErr)
+			} else {
+				log.Printf("Successfully sent 'topics not enabled' notification to chat ID %d during startup.", cfg.TelegramChatID)
+			}
+		} else {
+			log.Printf("Topics are enabled for chat ID %d. '📥' topic creation was attempted by CheckTopicsEnabled.", cfg.TelegramChatID)
 		}
 	}
 
