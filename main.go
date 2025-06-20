@@ -59,6 +59,20 @@ func main() {
 			// send a message to the user/group or handle it differently.
 			// For now, just logging.
 		}
+
+		// Check if topics are enabled for the chat
+		topicsEnabled, err := telegramBot.CheckTopicsEnabled(cfg.TelegramChatID)
+		if err != nil {
+			log.Printf("Error checking topics for chat ID %d: %v", cfg.TelegramChatID, err)
+		} else if !topicsEnabled {
+			notificationText := "В этой группе не включены темы. Пожалуйста, включите их для корректной работы."
+			notificationMsg := tgbotapi.NewMessage(cfg.TelegramChatID, notificationText)
+			if _, sendErr := telegramBot.api.Send(notificationMsg); sendErr != nil {
+				log.Printf("Error sending 'topics not enabled' notification to chat ID %d: %v", cfg.TelegramChatID, sendErr)
+			} else {
+				log.Printf("Sent 'topics not enabled' notification to chat ID %d.", cfg.TelegramChatID)
+			}
+		}
 	}
 
 	// OpenAI Client init
