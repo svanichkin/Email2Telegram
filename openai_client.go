@@ -25,10 +25,10 @@ func NewOpenAIClient(token string) (*OpenAIClient, error) {
 
 	systemPrompt := `Проанализируй следующее письмо и определи, является ли оно спамом. Верни результат в формате JSON:
 
-- Если письмо спам, верни:
+- Если письмо спам с вероятностью 95%, верни:
   {
     "is_spam": true,
-    "summary": "Краткое описание содержания"
+    "summary": "Краткое описание содержания на языке письма"
   }
 
 - Если письмо содержит код подтверждения или входа, верни:
@@ -37,12 +37,12 @@ func NewOpenAIClient(token string) (*OpenAIClient, error) {
     "code": "Код из письма"
   }
 
-- Если письмо не спам и не содержит код, верни:
+- Если письмо не спам или спам с вероятностью менее 95% и не содержит код, верни:
   {
     "is_spam": false
   }
 
-Ты помощник, который кратко пересказывает email-сообщения на русском языке. Не добавляй ничего от себя.`
+Ты помощник, который кратко пересказывает email-сообщения на языке письма. Не добавляй ничего от себя.`
 
 	return &OpenAIClient{
 		client:       client,
@@ -69,7 +69,8 @@ func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysis
 		context.Background(),
 		openai.ChatCompletionRequest{
 			//Model: "gpt-4o-mini",
-			Model: "gpt-4.1",
+			//Model: "gpt-4.1",
+			Model: "gpt-4o",
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleSystem,
@@ -102,7 +103,7 @@ func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysis
 }
 
 func cleanOpenAIResponse(resp string) string {
-	// Убираем тройные обратные кавычки с опциональным "json"
+
 	re := regexp.MustCompile("(?s)^```json\\s*(.*)\\s*```$|^```\\s*(.*)\\s*```$")
 	matches := re.FindStringSubmatch(resp)
 	if len(matches) > 0 {
@@ -112,6 +113,6 @@ func cleanOpenAIResponse(resp string) string {
 			}
 		}
 	}
-	// Если не матчится, возвращаем как есть, но без лишних пробелов
+
 	return strings.TrimSpace(resp)
 }
