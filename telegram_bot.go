@@ -13,10 +13,10 @@ import (
 )
 
 type TelegramBot struct {
-	api         *tgbotapi.BotAPI
-	recipientID int64
-	token       string
-	updates     tgbotapi.UpdatesChannel
+	api                        *tgbotapi.BotAPI
+	recipientID                int64
+	token                      string
+	updates                    tgbotapi.UpdatesChannel
 	topicCheckCompletedForChat map[int64]bool
 }
 
@@ -32,10 +32,10 @@ func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
 	updates := bot.GetUpdatesChan(u)
 
 	return &TelegramBot{
-		api: bot,
-		recipientID: recipientID,
-		token: apiToken,
-		updates: updates,
+		api:                        bot,
+		recipientID:                recipientID,
+		token:                      apiToken,
+		updates:                    updates,
 		topicCheckCompletedForChat: make(map[int64]bool),
 	}, nil
 }
@@ -185,9 +185,11 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) error {
 	botID := tb.api.Self.ID
 
 	// Get chat member information for the bot in the specified chat
-	chatMember, err := tb.api.GetChatMember(tgbotapi.ChatMemberConfig{
-		ChatID: chatID,
-		UserID: botID,
+	chatMember, err := tb.api.GetChatMember(tgbotapi.GetChatMemberConfig{
+		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+			ChatID: chatID,
+			UserID: botID,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get chat member info for bot %d in chat %d: %w", botID, chatID, err)
@@ -199,7 +201,7 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) error {
 	log.Printf("Bot status in chat %d is: %s", chatID, status)
 
 	if status != "administrator" && status != "creator" {
-		messageText := "Для корректной работы мне необходимы права администратора в этом групповом чате. Пожалуйста, предоставьте их." // "For correct operation, I need administrator rights in this group chat. Please provide them."
+		messageText := "For correct operation, I need administrator rights in this group chat. Please provide them."
 		msg := tgbotapi.NewMessage(chatID, messageText)
 		if _, sendErr := tb.api.Send(msg); sendErr != nil {
 			return fmt.Errorf("failed to send admin rights request message to chat %d: %w", chatID, sendErr)
@@ -215,27 +217,23 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) error {
 // CheckTopicsEnabled checks if topics are enabled (i.e., the chat is a forum).
 func (tb *TelegramBot) CheckTopicsEnabled(chatID int64) (bool, error) {
 	if tb.api == nil {
-		return false, errors.New("telegram API is not initialized in CheckTopicsEnabled")
+		return false, errors.New("telegram API not initialized")
 	}
 
-	chat, err := tb.api.GetChat(tgbotapi.ChatInfoConfig{ChatID: chatID})
+	params := tgbotapi.Params{
+		"chat_id": fmt.Sprint(chatID),
+		"name":    "temp-check-topic",
+	}
+
+	_, err := tb.api.MakeRequest("createForumTopic", params)
 	if err != nil {
-		log.Printf("Error getting chat info for chat ID %d: %v", chatID, err)
-		return false, fmt.Errorf("failed to get chat info: %w", err)
+		if strings.Contains(err.Error(), "forum topics are not enabled") {
+			return false, nil
+		}
+		return false, fmt.Errorf("unexpected error while checking topics: %w", err)
 	}
 
-	// TODO: Verify if 'IsForum' is the correct field.
-	// For now, if the field doesn't exist or is false, we assume topics are not enabled.
-	// Depending on the library version, this might be under a different name or a chat configuration.
-	log.Printf("Checking if topics are enabled for chat ID %d. Chat type: %s, IsForum: %t", chatID, chat.Type, chat.IsForum)
-
-	if chat.IsForum {
-		log.Printf("Topics are enabled for chat ID %d", chatID)
-		return true, nil
-	}
-
-	log.Printf("Topics are NOT enabled for chat ID %d (IsForum: %t)", chatID, chat.IsForum)
-	return false, nil
+	return true, nil
 }
 
 // Events from user
@@ -305,14 +303,14 @@ func (t *TelegramBot) handleUpdate(
 	}
 	msg := update.Message
 
-	if msg.Chat == nil { // Should not happen for normal messages
+	if msg.Chat == nil {
 		log.Printf("Ignoring update with nil Chat: UpdateID %d", update.UpdateID)
 		return
 	}
 
 	// The primary check: is the message from the configured chat/user?
+
 	if msg.Chat.ID != t.recipientID {
-		// Log details for diagnostics
 		fromID := int64(0)
 		if msg.From != nil {
 			fromID = msg.From.ID
@@ -325,16 +323,10 @@ func (t *TelegramBot) handleUpdate(
 		return
 	}
 
-	// At this point, the message is in the correct chat (either DM or the configured group).
-	// The original issue implies that if chat_id is used, any user in that chat can interact.
-	// If user_id was used for a DM, msg.Chat.ID == t.recipientID is sufficient.
-	// No further From.ID check is strictly needed here based on the issue's requirements for group mode.
-	// If cfg.TelegramUserId is set (even in group mode, for potential admin actions not covered here),
-	// that check could be added *within* specific command handlers if needed, not as a global filter.
-
 	log.Printf("Processing message from Chat.ID %d (RecipientID: %d), From.ID %d", msg.Chat.ID, t.recipientID, msg.From.ID)
 
 	// Check if topics are enabled for groups/supergroups, once per session
+
 	if (msg.Chat.IsGroup() || msg.Chat.IsSuperGroup()) && !t.topicCheckCompletedForChat[msg.Chat.ID] {
 		topicsEnabled, err := t.CheckTopicsEnabled(msg.Chat.ID)
 		if err != nil {
