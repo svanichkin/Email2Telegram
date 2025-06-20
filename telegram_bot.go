@@ -228,9 +228,25 @@ func (tb *TelegramBot) CheckTopicsEnabled(chatID int64) (bool, error) {
 	_, err := tb.api.MakeRequest("createForumTopic", params)
 	if err != nil {
 		if strings.Contains(err.Error(), "forum topics are not enabled") {
+			// Topics are explicitly not enabled.
 			return false, nil
 		}
+		// Some other unexpected error occurred during the check.
 		return false, fmt.Errorf("unexpected error while checking topics: %w", err)
+	}
+
+	// If we reach here, the initial check was successful (err == nil), meaning topics are enabled.
+	// Now, try to create the desired "📥" topic.
+	inboxTopicParams := tgbotapi.Params{
+		"chat_id": fmt.Sprint(chatID),
+		"name":    "📥",
+	}
+	_, createErr := tb.api.MakeRequest("createForumTopic", inboxTopicParams)
+	if createErr != nil {
+		log.Printf("Failed to create topic '📥' in chat ID %d: %v", chatID, createErr)
+		// Note: We still return true because the primary check for topic support succeeded.
+	} else {
+		log.Printf("Successfully created topic '📥' in chat ID %d", chatID)
 	}
 
 	return true, nil
