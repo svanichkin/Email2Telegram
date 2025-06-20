@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/BrianLeishman/go-imap"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func main() {
@@ -48,24 +49,25 @@ func main() {
 	}
 
 	if cfg.TelegramChatID != 0 {
-		// Call a new method on telegramBot that we will define in telegram_bot.go
-		// This method will check for admin rights and send a message if needed.
-		// We'll pass the chat ID to it.
 		log.Printf("Checking admin rights for bot in group chat ID: %d", cfg.TelegramChatID)
-		err := telegramBot.CheckAndRequestAdminRights(cfg.TelegramChatID)
+		adminEnabled, err := telegramBot.CheckAndRequestAdminRights(cfg.TelegramChatID)
 		if err != nil {
 			log.Printf("Error during CheckAndRequestAdminRights: %v", err)
-			// Depending on the severity or desired behavior, you might choose to
-			// send a message to the user/group or handle it differently.
-			// For now, just logging.
+		} else if !adminEnabled {
+			messageText := "For correct operation, I need administrator rights in this group chat. Please provide them."
+			msg := tgbotapi.NewMessage(cfg.TelegramChatID, messageText)
+			if _, sendErr := telegramBot.api.Send(msg); sendErr != nil {
+				log.Printf("failed to send admin rights request message to chat %d: %w", cfg.TelegramChatID, sendErr)
+			}
 		}
 
 		// Check if topics are enabled for the chat
+
 		topicsEnabled, err := telegramBot.CheckTopicsEnabled(cfg.TelegramChatID)
 		if err != nil {
 			log.Printf("Error checking topics for chat ID %d: %v", cfg.TelegramChatID, err)
 		} else if !topicsEnabled {
-			notificationText := "В этой группе не включены темы. Пожалуйста, включите их для корректной работы."
+			notificationText := "Topics are not enabled in this group. Please enable them for proper functionality."
 			notificationMsg := tgbotapi.NewMessage(cfg.TelegramChatID, notificationText)
 			if _, sendErr := telegramBot.api.Send(notificationMsg); sendErr != nil {
 				log.Printf("Error sending 'topics not enabled' notification to chat ID %d: %v", cfg.TelegramChatID, sendErr)

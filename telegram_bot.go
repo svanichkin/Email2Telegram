@@ -13,10 +13,10 @@ import (
 )
 
 type TelegramBot struct {
-	api                        *tgbotapi.BotAPI
-	recipientID                int64
-	token                      string
-	updates                    tgbotapi.UpdatesChannel
+	api         *tgbotapi.BotAPI
+	recipientID int64
+	token       string
+	updates     tgbotapi.UpdatesChannel
 }
 
 func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
@@ -31,10 +31,10 @@ func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
 	updates := bot.GetUpdatesChan(u)
 
 	return &TelegramBot{
-		api:                        bot,
-		recipientID:                recipientID,
-		token:                      apiToken,
-		updates:                    updates,
+		api:         bot,
+		recipientID: recipientID,
+		token:       apiToken,
+		updates:     updates,
 	}, nil
 }
 
@@ -174,9 +174,9 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode bool) error {
 	return cumulativeError
 }
 
-func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) error {
+func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) (bool, error) {
 	if tb.api == nil {
-		return errors.New("telegram API is not initialized in CheckAndRequestAdminRights")
+		return false, errors.New("telegram API is not initialized in CheckAndRequestAdminRights")
 	}
 
 	// Get bot's own ID
@@ -190,7 +190,7 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get chat member info for bot %d in chat %d: %w", botID, chatID, err)
+		return false, fmt.Errorf("failed to get chat member info for bot %d in chat %d: %w", botID, chatID, err)
 	}
 
 	// Check if the bot is an administrator or creator
@@ -199,17 +199,12 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) error {
 	log.Printf("Bot status in chat %d is: %s", chatID, status)
 
 	if status != "administrator" && status != "creator" {
-		messageText := "For correct operation, I need administrator rights in this group chat. Please provide them."
-		msg := tgbotapi.NewMessage(chatID, messageText)
-		if _, sendErr := tb.api.Send(msg); sendErr != nil {
-			return fmt.Errorf("failed to send admin rights request message to chat %d: %w", chatID, sendErr)
-		}
-		log.Printf("Sent admin rights request to chat %d", chatID)
+		return false, fmt.Errorf("sent admin rights request to chat %d", chatID)
 	} else {
 		log.Printf("Bot already has admin rights in chat %d (status: %s)", chatID, status)
 	}
 
-	return nil
+	return true, nil
 }
 
 // CheckTopicsEnabled checks if topics are enabled (i.e., the chat is a forum).
@@ -220,31 +215,13 @@ func (tb *TelegramBot) CheckTopicsEnabled(chatID int64) (bool, error) {
 
 	params := tgbotapi.Params{
 		"chat_id": fmt.Sprint(chatID),
-		"name":    "temp-check-topic",
 	}
-
-	_, err := tb.api.MakeRequest("createForumTopic", params)
+	_, err := tb.api.MakeRequest("getForumTopicIconStickers", params)
 	if err != nil {
-		if strings.Contains(err.Error(), "forum topics are not enabled") {
-			// Topics are explicitly not enabled.
+		if strings.Contains(err.Error(), "the chat is not a forum") {
 			return false, nil
 		}
-		// Some other unexpected error occurred during the check.
-		return false, fmt.Errorf("unexpected error while checking topics: %w", err)
-	}
-
-	// If we reach here, the initial check was successful (err == nil), meaning topics are enabled.
-	// Now, try to create the desired "📥" topic.
-	inboxTopicParams := tgbotapi.Params{
-		"chat_id": fmt.Sprint(chatID),
-		"name":    "📥",
-	}
-	_, createErr := tb.api.MakeRequest("createForumTopic", inboxTopicParams)
-	if createErr != nil {
-		log.Printf("Failed to create topic '📥' in chat ID %d: %v", chatID, createErr)
-		// Note: We still return true because the primary check for topic support succeeded.
-	} else {
-		log.Printf("Successfully created topic '📥' in chat ID %d", chatID)
+		return false, err
 	}
 
 	return true, nil
