@@ -27,11 +27,12 @@ type Config struct {
 	CheckIntervalSeconds int    `ini:"check_interval_seconds"`
 }
 
-func LoadConfig(filePath string) (*Config, error) {
+func LoadConfig(fp string) (*Config, error) {
 
 	// Load file from embed
 
-	configFile, err := ini.Load(configContent)
+	log.Println(au.Gray(12, "[CONFIG]"), au.Cyan("Loading configuration..."))
+	cf, err := ini.Load(configContent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config file: %w", err)
 	}
@@ -40,17 +41,17 @@ func LoadConfig(filePath string) (*Config, error) {
 
 	// Parse telegram section from embed
 
-	cfg.TelegramToken = configFile.Section("telegram").Key("token").String()
-	cfg.TelegramUserId, _ = configFile.Section("telegram").Key("user_id").Int64()
-	cfg.TelegramChatId, _ = configFile.Section("telegram").Key("chat_id").Int64()
+	cfg.TelegramToken = cf.Section("telegram").Key("token").String()
+	cfg.TelegramUserId, _ = cf.Section("telegram").Key("user_id").Int64()
+	cfg.TelegramChatId, _ = cf.Section("telegram").Key("chat_id").Int64()
 	if cfg.TelegramToken == "" || (cfg.TelegramUserId == 0 && cfg.TelegramChatId == 0) {
 
 		// Create new conf from template
 
-		configFilename := filePath + ".conf"
-		_, err = os.Stat(configFilename)
+		fn := fp + ".conf"
+		_, err = os.Stat(fn)
 		if err != nil || os.IsNotExist(err) {
-			err := os.WriteFile(configFilename, configContent, 0600)
+			err := os.WriteFile(fn, configContent, 0600)
 			if err != nil {
 				return nil, fmt.Errorf("failed to write config to disk: %w", err)
 			}
@@ -59,13 +60,13 @@ func LoadConfig(filePath string) (*Config, error) {
 
 		// Or load from disk
 
-		configFile, err = ini.Load(configFilename)
+		cf, err = ini.Load(fn)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load config file: %w", err)
 		}
-		cfg.TelegramToken = configFile.Section("telegram").Key("token").String()
-		cfg.TelegramUserId, _ = configFile.Section("telegram").Key("user_id").Int64()
-		cfg.TelegramChatId, _ = configFile.Section("telegram").Key("chat_id").Int64()
+		cfg.TelegramToken = cf.Section("telegram").Key("token").String()
+		cfg.TelegramUserId, _ = cf.Section("telegram").Key("user_id").Int64()
+		cfg.TelegramChatId, _ = cf.Section("telegram").Key("chat_id").Int64()
 		if cfg.TelegramToken == "" || (cfg.TelegramUserId == 0 && cfg.TelegramChatId == 0) {
 			return nil, fmt.Errorf("missing required configuration fields: TelegramToken and one of TelegramUserID or TelegramChatID")
 		}
@@ -73,54 +74,37 @@ func LoadConfig(filePath string) (*Config, error) {
 
 	// Parse openai section (optional)
 
-	openAISection, err := configFile.GetSection("openai")
+	ai, err := cf.GetSection("openai")
 	if err == nil {
-		if tokenKey, keyErr := openAISection.GetKey("token"); keyErr == nil {
-			cfg.OpenAIToken = tokenKey.String()
-		}
-	} else {
-		configFilename := filePath
-		if !strings.HasSuffix(configFilename, ".conf") {
-			configFilename += ".conf"
-		}
-
-		if _, statErr := os.Stat(configFilename); statErr == nil {
-			diskConfigFile, loadErr := ini.Load(configFilename)
-			if loadErr == nil {
-				openAISectionFromDisk, sectionErr := diskConfigFile.GetSection("openai")
-				if sectionErr == nil {
-					if tokenKey, keyErr := openAISectionFromDisk.GetKey("token"); keyErr == nil {
-						cfg.OpenAIToken = tokenKey.String()
-					}
-				}
-			}
+		if t, err := ai.GetKey("token"); err == nil {
+			cfg.OpenAIToken = t.String()
 		}
 	}
 
 	// Parse email section
 
-	cfg.EmailImapPort, _ = configFile.Section("email").Key("imap_port").Int()
+	cfg.EmailImapPort, _ = cf.Section("email").Key("imap_port").Int()
 	if cfg.EmailImapPort == 0 {
 		cfg.EmailImapPort = 993
 	}
-	cfg.EmailSmtpPort, _ = configFile.Section("email").Key("smtp_port").Int()
+	cfg.EmailSmtpPort, _ = cf.Section("email").Key("smtp_port").Int()
 	if cfg.EmailSmtpPort == 0 {
 		cfg.EmailSmtpPort = 587
 	}
 
-	emailUsername := configFile.Section("email").Key("username").String()
+	emailUsername := cf.Section("email").Key("username").String()
 	if emailUsername == "" {
 		emailUsername = readUsername(cfg.TelegramUserId)
 	} else {
 		cfg.SetCred(emailUsername, "")
 	}
 
-	if host := configFile.Section("email").Key("host").String(); len(host) > 0 {
+	if host := cf.Section("email").Key("host").String(); len(host) > 0 {
 		cfg.EmailImapHost = host
 		cfg.EmailSmtpHost = host
 	} else {
-		cfg.EmailImapHost = configFile.Section("email").Key("imap_host").String()
-		cfg.EmailSmtpHost = configFile.Section("email").Key("smtp_host").String()
+		cfg.EmailImapHost = cf.Section("email").Key("imap_host").String()
+		cfg.EmailSmtpHost = cf.Section("email").Key("smtp_host").String()
 	}
 	if host, err := getHost(emailUsername); err == nil {
 		if len(cfg.EmailImapHost) == 0 {
@@ -164,23 +148,23 @@ func parseCredString(cred string) (string, string) {
 
 }
 
-func readUsername(userId int64) string {
+func readUsername(uid int64) string {
 
-	creds, _ := keyring.Get("email2Telegram", fmt.Sprint(userId))
+	creds, _ := keyring.Get("email2Telegram", fmt.Sprint(uid))
 	email, _ := parseCredString(creds)
 
 	return email
 
 }
 
-func readCred(userId int64) (string, string) {
+func readCred(uid int64) (string, string) {
 
-	creds, err := keyring.Get("email2Telegram", fmt.Sprint(userId))
+	creds, err := keyring.Get("email2Telegram", fmt.Sprint(uid))
 	if err != nil {
-		log.Printf("failed get cred: %v", err)
-		decrypted, err := LoadAndDecrypt(fmt.Sprint(userId), fmt.Sprint(userId)+".key")
+		log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Red("Failed to get credentials from keyring: %v").String(), err)
+		decrypted, err := LoadAndDecrypt(fmt.Sprint(uid), fmt.Sprint(uid)+".key")
 		if err != nil {
-			log.Printf("failed get cred from file: %v", err)
+			log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Red("Failed to get credentials from file: %v").String(), err)
 		}
 		fmt.Println(decrypted)
 		return decrypted["email"], decrypted["password"]
@@ -192,9 +176,9 @@ func readCred(userId int64) (string, string) {
 
 func (cfg *Config) updateHostIfNeeded(email string) {
 
-	log.Printf("imap host: %s", cfg.EmailImapHost)
+	log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Blue("Current IMAP host: %s").String(), cfg.EmailImapHost)
 	if host, err := getHost(email); err == nil {
-		log.Printf("new host: %s", host)
+		log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Blue("Extracted host from email: %s").String(), host)
 		if len(cfg.EmailImapHost) == 0 {
 			cfg.EmailImapHost = host
 		}
@@ -202,7 +186,7 @@ func (cfg *Config) updateHostIfNeeded(email string) {
 			cfg.EmailSmtpHost = host
 		}
 	} else {
-		log.Printf("failed get host from cred: %v", err)
+		log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Red("Failed to extract host from email: %v").String(), err)
 	}
 
 }
@@ -211,6 +195,7 @@ func (cfg *Config) updateHostIfNeeded(email string) {
 
 func (cfg *Config) GetCred() (string, string) {
 
+	log.Println(au.Gray(12, "[CONFIG]"), au.Cyan("Retrieving credentials..."))
 	email, password := readCred(cfg.TelegramUserId)
 	cfg.updateHostIfNeeded(email)
 
@@ -220,14 +205,19 @@ func (cfg *Config) GetCred() (string, string) {
 
 func (cfg *Config) SetCred(email string, password string) {
 
+	log.Println(au.Gray(12, "[CONFIG]"), au.Cyan("Storing credentials..."))
 	err := keyring.Set("email2Telegram", fmt.Sprint(cfg.TelegramUserId), createCredString(email, password))
 	if err != nil {
-		log.Printf("failed set cred: %v", err)
+		log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Red("Failed to store credentials in keyring: %v").String(), err)
 		creds := map[string]string{"email": email, "password": password}
 		err := EncryptAndSave(fmt.Sprint(cfg.TelegramUserId), fmt.Sprint(cfg.TelegramUserId)+".key", creds)
 		if err != nil {
-			log.Printf("failed get cred from file: %v", err)
+			log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Red("Failed to store credentials in file: %v").String(), err)
+		} else {
+			log.Println(au.Gray(12, "[CONFIG]"), au.Green("Credentials stored securely in file: "+fmt.Sprint(cfg.TelegramUserId)+".key"))
 		}
+	} else {
+		log.Println(au.Gray(12, "[CONFIG]"), au.Green("Credentials stored securely in keyring"))
 	}
 	cfg.updateHostIfNeeded(email)
 
