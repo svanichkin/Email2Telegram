@@ -49,6 +49,9 @@ func main() {
 	}
 
 	if cfg.TelegramChatID != 0 {
+
+		// Check if admin are enabled for the chat
+
 		log.Printf("Checking admin rights for bot in group chat ID: %d", cfg.TelegramChatID)
 		adminEnabled, err := telegramBot.CheckAndRequestAdminRights(cfg.TelegramChatID)
 		if err != nil {
@@ -209,24 +212,17 @@ func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot, openAI
 		emailData := ParseEmail(mail, uid)
 
 		isCode := false
+		isSpam := false
 		if openAIClient != nil && emailData != nil && emailData.TextBody != "" {
 			log.Printf("Attempting to process email UID %d with OpenAI...", uid)
 			result, err := openAIClient.GenerateTextFromEmail(emailData.Subject + " " + emailData.From + " " + emailData.TextBody)
 			if err != nil {
 				log.Printf("Failed to process email UID %d with OpenAI: %v. Sending original email.", uid, err)
-			} else if result.IsSpam {
-				emailData.Subject = "🚫 " + emailData.Subject
-				emailData.TextBody = result.Summary
-			} else if result.Code != "" {
-				isCode = true
-				emailData.Subject = "🔑 " + emailData.Subject
-				emailData.TextBody = result.Code
-			} else {
-				emailData.Subject = "✉️ " + emailData.Subject
 			}
+			isSpam = result.IsSpam
 		}
 
-		if err := telegramBot.SendEmailData(emailData, isCode); err != nil {
+		if err := telegramBot.SendEmailData(emailData, isCode, isSpam); err != nil {
 			log.Printf("Error sending email %d to Telegram: %v", uid, err)
 			continue
 		}

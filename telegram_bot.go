@@ -1,9 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"mime/multipart"
+	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,9 +21,11 @@ import (
 
 type TelegramBot struct {
 	api         *tgbotapi.BotAPI
-	recipientID int64
+	recipientId int64
 	token       string
 	updates     tgbotapi.UpdatesChannel
+	isChat      bool
+	topics      map[string]string
 }
 
 func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
@@ -32,7 +41,7 @@ func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
 
 	return &TelegramBot{
 		api:         bot,
-		recipientID: recipientID,
+		recipientId: recipientID,
 		token:       apiToken,
 		updates:     updates,
 	}, nil
@@ -48,7 +57,7 @@ func (t *TelegramBot) StartListener(
 }
 
 func (tb *TelegramBot) SendMessage(msg string) {
-	tb.api.Send(tgbotapi.NewMessage(tb.recipientID, msg))
+	tb.api.Send(tgbotapi.NewMessage(tb.recipientId, msg))
 }
 
 func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
@@ -56,11 +65,11 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 		return "", errors.New("telegram API is not initialized")
 	}
 
-	msg := tgbotapi.NewMessage(tb.recipientID, prompt)
+	msg := tgbotapi.NewMessage(tb.recipientId, prompt)
 	if _, err := tb.api.Send(msg); err != nil {
 		return "", fmt.Errorf("failed to send: %w", err)
 	}
-	log.Printf("Sent prompt to recipient ID %d: %s", tb.recipientID, prompt)
+	log.Printf("Sent prompt to recipient ID %d: %s", tb.recipientId, prompt)
 
 	timeout := time.After(5 * time.Minute)
 
@@ -70,11 +79,11 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 			if update.Message == nil {
 				continue
 			}
-			if update.Message.Chat.ID == tb.recipientID {
+			if update.Message.Chat.ID == tb.recipientId {
 				log.Printf("Received reply: %s", update.Message.Text)
 				return update.Message.Text, nil
 			}
-			log.Printf("RequestUserInput: Ignored message in chat %d from user %d (expected chat %d)", update.Message.Chat.ID, update.Message.From.ID, tb.recipientID)
+			log.Printf("RequestUserInput: Ignored message in chat %d from user %d (expected chat %d)", update.Message.Chat.ID, update.Message.From.ID, tb.recipientId)
 
 		case <-timeout:
 			log.Println("Timeout waiting for input reply.")
@@ -83,7 +92,7 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 	}
 }
 
-func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode bool) error {
+func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool) error {
 
 	if tb.api == nil {
 		return errors.New("telegram API is not initialized")
@@ -92,58 +101,90 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode bool) error {
 		return errors.New("parsed email data is nil")
 	}
 
-	var cumulativeError error
+	var topicId string
+	if tb.isChat && !isSpam {
+		if tb.topics == nil {
+			s := fmt.Sprint(tb.recipientId)
+			tb.topics, _ = LoadAndDecrypt(s, s+".top")
+		}
+		s := cleanSubject(data.Subject)
+		topicId = tb.topics[s]
+		if topicId == "" {
+			tb.topics = make(map[string]string)
+			topicId, err := tb.ensureTopic(s)
+			if err != nil {
+				return fmt.Errorf("topic handling error: %w", err)
+			}
+			tb.topics[s] = fmt.Sprint(topicId)
+			s := fmt.Sprint(tb.recipientId)
+			EncryptAndSave(s, s+".top", tb.topics)
+		}
+	}
 
 	// if code message
 
-	var messages []string
-	var text string
 	if isCode {
-		text = "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>"
-
-		msg := tgbotapi.NewMessage(tb.recipientID, text+telehtml.EncodeIntInvisible(data.Uid))
-		msg.ParseMode = "HTML"
-		msg.DisableWebPagePreview = true
-		if _, err := tb.api.Send(msg); err != nil {
-			log.Printf("Error sending title message: %v", err)
-			if cumulativeError == nil {
-				cumulativeError = fmt.Errorf("failed to send title message: %w", err)
-			} else {
-				cumulativeError = fmt.Errorf("%v; failed to send title message: %w", cumulativeError, err)
+		if !tb.isChat {
+			t := "🔑 <b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>"
+			msg := tgbotapi.NewMessage(tb.recipientId, t+telehtml.EncodeIntInvisible(data.Uid))
+			msg.ParseMode = "HTML"
+			msg.DisableWebPagePreview = true
+			if _, err := tb.api.Send(msg); err != nil {
+				return fmt.Errorf("failed to send title message: %w", err)
+			}
+			msg = tgbotapi.NewMessage(tb.recipientId, data.TextBody)
+			if _, err := tb.api.Send(msg); err != nil {
+				return fmt.Errorf("failed to send code message: %w", err)
+			}
+		} else {
+			params := tgbotapi.Params{
+				"chat_id":                  fmt.Sprint(tb.recipientId),
+				"message_thread_id":        topicId,
+				"text":                     data.TextBody,
+				"parse_mode":               "HTML",
+				"disable_web_page_preview": "true",
+			}
+			if _, err := tb.api.MakeRequest("sendMessage", params); err != nil {
+				return fmt.Errorf("failed to send code message to topic: %w", err)
 			}
 		}
-
-		msg = tgbotapi.NewMessage(tb.recipientID, data.TextBody+telehtml.EncodeIntInvisible(data.Uid))
-		if _, err := tb.api.Send(msg); err != nil {
-			log.Printf("Error sending code message: %v", err)
-			if cumulativeError == nil {
-				cumulativeError = fmt.Errorf("failed to send code message: %w", err)
-			} else {
-				cumulativeError = fmt.Errorf("%v; failed to send code message: %w", cumulativeError, err)
-			}
-		}
-
-		return cumulativeError
-
+		return nil
 	}
 
 	// Header + text, then split
 
-	text = "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n" + data.TextBody
-	messages = telehtml.SplitTelegramHTML(text)
+	var messages []string
+	var t = data.TextBody
+	if !tb.isChat {
+		t = "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n" + t
+		if isSpam {
+			t = "🚫 " + t
+		} else {
+			t = "✉️ " + t
+		}
+	}
+	messages = telehtml.SplitTelegramHTML(t)
 
 	// Send messages
 
 	for i := range len(messages) {
-		msg := tgbotapi.NewMessage(tb.recipientID, messages[i]+telehtml.EncodeIntInvisible(data.Uid))
-		msg.ParseMode = "HTML"
-		msg.DisableWebPagePreview = true
-		if _, err := tb.api.Send(msg); err != nil {
-			log.Printf("Error sending main message: %v", err)
-			if cumulativeError == nil {
-				cumulativeError = fmt.Errorf("failed to send main message: %w", err)
-			} else {
-				cumulativeError = fmt.Errorf("%v; failed to send main message: %w", cumulativeError, err)
+		if !tb.isChat {
+			msg := tgbotapi.NewMessage(tb.recipientId, messages[i]+telehtml.EncodeIntInvisible(data.Uid))
+			msg.ParseMode = "HTML"
+			msg.DisableWebPagePreview = true
+			if _, err := tb.api.Send(msg); err != nil {
+				return fmt.Errorf("failed to send main message: %w", err)
+			}
+		} else {
+			params := tgbotapi.Params{
+				"chat_id":                  fmt.Sprint(tb.recipientId),
+				"message_thread_id":        topicId,
+				"text":                     messages[i],
+				"parse_mode":               "HTML",
+				"disable_web_page_preview": "true",
+			}
+			if _, err := tb.api.MakeRequest("sendMessage", params); err != nil {
+				return fmt.Errorf("failed to send code message to topic: %w", err)
 			}
 		}
 	}
@@ -158,31 +199,105 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode bool) error {
 				continue
 			}
 			attachmentFile := tgbotapi.FileBytes{Name: filename, Bytes: contentBytes}
-			docMsg := tgbotapi.NewDocument(tb.recipientID, attachmentFile)
-			log.Printf("Sending attachment: %s (size: %d bytes)", filename, len(contentBytes))
-			if _, err := tb.api.Send(docMsg); err != nil {
-				log.Printf("Error sending attachment '%s': %v", filename, err)
-				if cumulativeError == nil {
-					cumulativeError = fmt.Errorf("failed to send attachment %s: %w", filename, err)
-				} else {
-					cumulativeError = fmt.Errorf("%v; failed to send attachment %s: %w", cumulativeError, filename, err)
+			if tb.isChat {
+				docMsg := tgbotapi.NewDocument(tb.recipientId, attachmentFile)
+				log.Printf("Sending attachment: %s (size: %d bytes)", filename, len(contentBytes))
+				if _, err := tb.api.Send(docMsg); err != nil {
+					return fmt.Errorf("failed to send attachment %s: %w", filename, err)
 				}
+			} else {
+				attachmentFile := tgbotapi.FileBytes{Name: filename, Bytes: contentBytes}
+				body := &bytes.Buffer{}
+				writer := multipart.NewWriter(body)
+				writer.WriteField("chat_id", strconv.FormatInt(tb.recipientId, 10))
+				writer.WriteField("message_thread_id", topicId)
+
+				part, err := writer.CreateFormFile("document", filename)
+				if err != nil {
+					return fmt.Errorf("failed to create form file: %w", err)
+				}
+				if _, err := io.Copy(part, bytes.NewReader(attachmentFile.Bytes)); err != nil {
+					return fmt.Errorf("failed to write file content: %w", err)
+				}
+				if err := writer.Close(); err != nil {
+					return fmt.Errorf("failed to close multipart writer: %w", err)
+				}
+				apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", tb.api.Token)
+				req, err := http.NewRequest("POST", apiURL, body)
+				if err != nil {
+					return fmt.Errorf("failed to create request: %w", err)
+				}
+				req.Header.Set("Content-Type", writer.FormDataContentType())
+				client := &http.Client{}
+				resp, err := client.Do(req)
+				if err != nil {
+					return fmt.Errorf("failed to send HTTP request: %w", err)
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					respBody, _ := io.ReadAll(resp.Body)
+					return fmt.Errorf("telegram API error: %d - %s", resp.StatusCode, string(respBody))
+				}
+				log.Printf("Successfully sent document to topic %d", topicId)
 			}
 		}
 	}
 
-	return cumulativeError
+	return nil
+}
+
+func cleanSubject(subject string) string {
+
+	re := regexp.MustCompile(`(?i)^(re|fwd|fw):\s*`)
+	for re.MatchString(subject) {
+		subject = re.ReplaceAllString(subject, "")
+	}
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		return ""
+	}
+	return strings.ToUpper(subject)
+
+}
+
+func (tb *TelegramBot) ensureTopic(subject string) (int, error) {
+
+	params := tgbotapi.Params{
+		"chat_id":    fmt.Sprint(tb.recipientId),
+		"name":       subject,
+		"icon_color": "1", // сделать рандом Color of the topic icon in RGB format. Currently, must be one of 7322096 (0x6FB9F0), 16766590 (0xFFD67E), 13338331 (0xCB86DB), 9367192 (0x8EEE98), 16749490 (0xFF93B2), or 16478047 (0xFB6F5F)
+	}
+
+	resp, err := tb.api.MakeRequest("createForumTopic", params)
+	if err != nil {
+		return 0, fmt.Errorf("createForumTopic error: %w", err)
+	}
+
+	var createResult struct {
+		Result struct {
+			MessageThreadID int `json:"message_thread_id"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(resp.Result, &createResult); err != nil {
+		return 0, err
+	}
+
+	return createResult.Result.MessageThreadID, nil
 }
 
 func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) (bool, error) {
+
 	if tb.api == nil {
 		return false, errors.New("telegram API is not initialized in CheckAndRequestAdminRights")
 	}
 
 	// Get bot's own ID
+
 	botID := tb.api.Self.ID
 
 	// Get chat member information for the bot in the specified chat
+
 	chatMember, err := tb.api.GetChatMember(tgbotapi.GetChatMemberConfig{
 		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
 			ChatID: chatID,
@@ -194,6 +309,7 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) (bool, error) {
 	}
 
 	// Check if the bot is an administrator or creator
+
 	// Common statuses: "creator", "administrator", "member", "restricted", "left", "kicked"
 	status := chatMember.Status
 	log.Printf("Bot status in chat %d is: %s", chatID, status)
@@ -207,10 +323,12 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) (bool, error) {
 	return true, nil
 }
 
-// CheckTopicsEnabled checks if topics are enabled (i.e., the chat is a forum).
 func (tb *TelegramBot) CheckTopicsEnabled(chatID int64) (bool, error) {
+
+	tb.isChat = false
+
 	if tb.api == nil {
-		return false, errors.New("telegram API not initialized")
+		return tb.isChat, errors.New("telegram API not initialized")
 	}
 
 	params := tgbotapi.Params{
@@ -219,12 +337,13 @@ func (tb *TelegramBot) CheckTopicsEnabled(chatID int64) (bool, error) {
 	_, err := tb.api.MakeRequest("getForumTopicIconStickers", params)
 	if err != nil {
 		if strings.Contains(err.Error(), "the chat is not a forum") {
-			return false, nil
+			return tb.isChat, nil
 		}
-		return false, err
+		return tb.isChat, err
 	}
 
-	return true, nil
+	tb.isChat = true
+	return tb.isChat, nil
 }
 
 // Events from user
@@ -301,7 +420,7 @@ func (t *TelegramBot) handleUpdate(
 
 	// The primary check: is the message from the configured chat/user?
 
-	if msg.Chat.ID != t.recipientID {
+	if msg.Chat.ID != t.recipientId {
 		fromID := int64(0)
 		if msg.From != nil {
 			fromID = msg.From.ID
@@ -310,13 +429,11 @@ func (t *TelegramBot) handleUpdate(
 		if msg.SenderChat != nil {
 			senderChatID = msg.SenderChat.ID
 		}
-		log.Printf("Ignoring message from unexpected chat: MessageChat.ID=%d, From.ID=%d, SenderChat.ID=%d. Expected recipientID: %d", msg.Chat.ID, fromID, senderChatID, t.recipientID)
+		log.Printf("Ignoring message from unexpected chat: MessageChat.ID=%d, From.ID=%d, SenderChat.ID=%d. Expected recipientID: %d", msg.Chat.ID, fromID, senderChatID, t.recipientId)
 		return
 	}
 
-	log.Printf("Processing message from Chat.ID %d (RecipientID: %d), From.ID %d", msg.Chat.ID, t.recipientID, msg.From.ID)
-
-	// Command handling removed from here
+	log.Printf("Processing message from Chat.ID %d (RecipientID: %d), From.ID %d", msg.Chat.ID, t.recipientId, msg.From.ID)
 
 	// Reply message
 
