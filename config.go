@@ -22,7 +22,7 @@ type Config struct {
 	EmailSmtpPort        int    `ini:"smtp_port"`
 	TelegramToken        string `ini:"token"`
 	TelegramUserId       int64  `ini:"user_id"`
-	TelegramChatID       int64  `ini:"chat_id"`
+	TelegramChatId       int64  `ini:"chat_id"`
 	OpenAIToken          string `ini:"token"`
 	CheckIntervalSeconds int    `ini:"check_interval_seconds"`
 }
@@ -42,8 +42,8 @@ func LoadConfig(filePath string) (*Config, error) {
 
 	cfg.TelegramToken = configFile.Section("telegram").Key("token").String()
 	cfg.TelegramUserId, _ = configFile.Section("telegram").Key("user_id").Int64()
-	cfg.TelegramChatID, _ = configFile.Section("telegram").Key("chat_id").Int64()
-	if cfg.TelegramToken == "" || (cfg.TelegramUserId == 0 && cfg.TelegramChatID == 0) {
+	cfg.TelegramChatId, _ = configFile.Section("telegram").Key("chat_id").Int64()
+	if cfg.TelegramToken == "" || (cfg.TelegramUserId == 0 && cfg.TelegramChatId == 0) {
 
 		// Create new conf from template
 
@@ -65,8 +65,8 @@ func LoadConfig(filePath string) (*Config, error) {
 		}
 		cfg.TelegramToken = configFile.Section("telegram").Key("token").String()
 		cfg.TelegramUserId, _ = configFile.Section("telegram").Key("user_id").Int64()
-		cfg.TelegramChatID, _ = configFile.Section("telegram").Key("chat_id").Int64()
-		if cfg.TelegramToken == "" || (cfg.TelegramUserId == 0 && cfg.TelegramChatID == 0) {
+		cfg.TelegramChatId, _ = configFile.Section("telegram").Key("chat_id").Int64()
+		if cfg.TelegramToken == "" || (cfg.TelegramUserId == 0 && cfg.TelegramChatId == 0) {
 			return nil, fmt.Errorf("missing required configuration fields: TelegramToken and one of TelegramUserID or TelegramChatID")
 		}
 	}

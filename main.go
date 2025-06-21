@@ -2,175 +2,141 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"net/mail"
 	"os"
 	"os/signal"
-	"path/filepath" // Added for strings.TrimSpace
-	"strings"
+	"path/filepath"
 	"sync"
 	"syscall"
 
+	"strings"
+
 	"github.com/BrianLeishman/go-imap"
 	"github.com/logrusorgru/aurora/v4"
-	// tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5" // Will be removed if all direct uses are gone
 )
 
 var au aurora.Aurora
 
-type colorWriter struct {
-	io.Writer
-}
-
-func (cw *colorWriter) Write(p []byte) (n int, err error) {
-	s := string(p)
-	timestampAndRest := strings.SplitN(s, " ", 2)
-	if len(timestampAndRest) != 2 {
-		return cw.Writer.Write(p) // Default if format is unexpected
-	}
-	timestamp := timestampAndRest[0]
-	message := strings.TrimSuffix(timestampAndRest[1], "\n") // Trim newline for coloring
-
-	var coloredMessage aurora.Value
-	switch {
-	case strings.HasPrefix(message, "Failed to") || strings.HasPrefix(message, "Critical configuration error:") || strings.HasPrefix(message, "Error "):
-		coloredMessage = au.Red(message)
-	case strings.HasPrefix(message, "Warning:"):
-		coloredMessage = au.Yellow(message)
-	case strings.HasPrefix(message, "Successfully") || strings.HasPrefix(message, "Sent ") || strings.HasPrefix(message, "Operating in"):
-		coloredMessage = au.Green(message)
-	case strings.HasPrefix(message, "Note:"):
-		coloredMessage = au.Cyan(message)
-	case strings.HasPrefix(message, "Starting Email Processor..."): // Specific case for the first message
-		coloredMessage = au.Cyan(message)
-	default:
-		coloredMessage = au.BrightBlack(message) // Default color for other messages
-	}
-	// Add newline back after coloring
-	return cw.Writer.Write([]byte(au.Gray(10, timestamp).String() + " " + coloredMessage.String() + "\n"))
-}
-
 func main() {
-	au = aurora.New(aurora.WithColors(true))
-	log.SetOutput(&colorWriter{Writer: os.Stderr})
-	// log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds) // Keep existing flags, colorWriter will handle the coloring part
-	// No need to set flags if we want the default log.LstdFlags (date and time)
-	// The colorWriter will receive the full log line including the prefix set by log.SetFlags()
-	// Let's keep the default flags, which include date and time. Microseconds might be too verbose.
-	// The au.Cyan in log.Println below will be handled by the colorWriter now.
 
-	log.Println("Starting Email Processor...")
+	// Colorful logs
+
+	au = *aurora.New(aurora.WithColors(true))
+	log.SetOutput(os.Stderr)
+	log.SetFlags(0)
+
+	log.Println(au.Gray(12, "[INIT]"), au.Cyan("Email Processor"), au.Green(aurora.Bold("starting...")))
 
 	// Config loading
 
 	cfg, err := LoadConfig(filepath.Base(os.Args[0]))
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red(aurora.Bold("Failed to load config: %v")).String(), err)
 	}
 
-	// Determine recipientID for Telegram bot
+	// Chat id or user id
 
-	var recipientID int64
-	if cfg.TelegramChatID != 0 {
-		recipientID = cfg.TelegramChatID
-		log.Printf("Operating in group chat mode. Chat ID: %d", recipientID)
+	var rid int64
+	if cfg.TelegramChatId != 0 {
+		rid = cfg.TelegramChatId
+		log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Blue("Operating in group chat mode. Chat ID: %d").String(), rid)
 		if cfg.TelegramUserId != 0 {
-			log.Printf("Note: Telegram UserID (%d) is also set in config, but ChatID (%d) takes precedence for bot operations.", cfg.TelegramUserId, cfg.TelegramChatID)
+			log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Yellow("Note: Telegram UserID (%d) is also set in config, but ChatID (%d) takes precedence for bot operations.").String(), cfg.TelegramUserId, cfg.TelegramChatId)
 		}
 	} else if cfg.TelegramUserId != 0 {
-		recipientID = cfg.TelegramUserId
-		log.Printf("Operating in direct user message mode. User ID: %d", recipientID)
+		rid = cfg.TelegramUserId
+		log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Blue("Operating in direct user message mode. User ID: %d").String(), rid)
 	} else {
-		log.Fatalf("Critical configuration error: Neither Telegram UserID nor ChatID is set after config load. Token presence: %t", cfg.TelegramToken != "")
+		log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red(aurora.Bold("Critical configuration error: Neither Telegram UserID nor ChatID is set after config load. Token presence: %t")).String(), cfg.TelegramToken != "")
 	}
 
 	// Telegram init
 
-	telegramBot, err := NewTelegramBot(cfg.TelegramToken, recipientID)
+	tb, err := NewTelegramBot(cfg.TelegramToken, rid)
 	if err != nil {
-		log.Fatalf("Failed to init Telegram bot: %v", err)
+		log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red(aurora.Bold("Failed to init Telegram bot: %v")).String(), err)
 	}
 
-	if cfg.TelegramChatID != 0 { // This implies recipientID for the bot is cfg.TelegramChatID
+	// Check permissions if group mode
 
-		// Check if admin are enabled for the chat
-		log.Printf("Checking admin rights for bot in group chat ID: %d", cfg.TelegramChatID)
-		adminEnabled, errAdminCheck := telegramBot.CheckAndRequestAdminRights(cfg.TelegramChatID)
-		if errAdminCheck != nil {
-			log.Printf("Error during CheckAndRequestAdminRights API call: %v", errAdminCheck)
-		} else if !adminEnabled {
-			// Check was successful, but rights are missing
-			messageText := "For correct operation, I need administrator rights in this group chat. Please provide them."
-			if sendErr := telegramBot.SendMessage(messageText); sendErr != nil {
-				// tb.recipientId is cfg.TelegramChatID in this context
-				log.Printf("Failed to send admin rights request message to chat %d: %v", cfg.TelegramChatID, sendErr)
+	if cfg.TelegramChatId != 0 {
+		log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Magenta("Checking admin rights for bot in group chat ID: %d").String(), cfg.TelegramChatId)
+
+		// Check admin rights
+
+		ok, err := tb.CheckAndRequestAdminRights(cfg.TelegramChatId)
+		if err != nil {
+			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Error during CheckAndRequestAdminRights API call: %v").String(), err)
+		} else if !ok {
+			if err := tb.SendMessage("For correct operation, I need administrator rights in this group chat. Please provide them."); err != nil {
+				log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed to send admin rights request message to chat %d: %v").String(), cfg.TelegramChatId, err)
 			}
+			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed admin rights for chat: %d").String(), cfg.TelegramChatId)
 		}
 
-		// Check if topics are enabled for the chat
-		topicsEnabled, errTopicsCheck := telegramBot.CheckTopicsEnabled(cfg.TelegramChatID)
-		if errTopicsCheck != nil {
-			log.Printf("Error checking topics for chat ID %d: %v", cfg.TelegramChatID, errTopicsCheck)
-		} else if !topicsEnabled {
-			// Check was successful, but topics are not enabled
-			notificationText := "Topics are not enabled in this group. Please enable them for proper functionality."
-			if sendErr := telegramBot.SendMessage(notificationText); sendErr != nil {
-				// tb.recipientId is cfg.TelegramChatID in this context
-				log.Printf("Error sending 'topics not enabled' notification to chat ID %d: %v", cfg.TelegramChatID, sendErr)
-			} else {
-				log.Printf("Sent 'topics not enabled' notification to chat ID %d.", cfg.TelegramChatID)
+		// Check topics enabled
+
+		ok, err = tb.CheckTopicsEnabled(cfg.TelegramChatId)
+		if err != nil {
+			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Error checking topics for chat ID %d: %v").String(), cfg.TelegramChatId, err)
+		} else if !ok {
+			if err := tb.SendMessage("Topics are not enabled in this group. Please enable them for proper functionality."); err != nil {
+				log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Error sending 'topics not enabled' notification to chat ID %d: %v").String(), cfg.TelegramChatId, err)
 			}
+			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed topics enabled for chat: %d").String(), cfg.TelegramChatId)
 		}
 	}
 
 	// OpenAI Client init
 
-	var openAIClient *OpenAIClient
-	openAIClient, err = NewOpenAIClient(cfg.OpenAIToken)
+	var ai *OpenAIClient
+	ai, err = NewOpenAIClient(cfg.OpenAIToken)
 	if err != nil {
-		log.Printf("Warning: Failed to initialize OpenAI client: %v. OpenAI features will be disabled.", err)
-		openAIClient = nil
-	} else if openAIClient == nil {
-		log.Println("OpenAI token not provided or empty. OpenAI features will be disabled.")
+		log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Yellow(aurora.Bold("Warning: Failed to initialize OpenAI client: %v. OpenAI features will be disabled.")).String(), err)
+		ai = nil
+	} else if ai == nil {
+		log.Println(au.Gray(12, "[INIT]").String() + " " + au.Yellow("OpenAI token not provided or empty. OpenAI features will be disabled.").String())
 	} else {
-		log.Println("OpenAI client initialized successfully.")
+		log.Println(au.Gray(12, "[INIT]").String() + " " + au.Green("OpenAI client initialized successfully.").String())
 	}
 
 	// User request for username if needed
 
+	// TODO: test for multiple user wrong input
 	email, password := cfg.GetCred()
-
 	for email == "" {
-		email, err = telegramBot.RequestUserInput("Enter your email please...")
+		email, err = tb.RequestUserInput("Enter your email please...")
 		if err != nil {
-			log.Printf("Error getting username: %v", err)
+			log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Red("Error getting username: %v").String(), err)
 			continue
 		}
 		if _, err := mail.ParseAddress(email); err != nil {
-			if errSend := telegramBot.SendMessage("Email not valid!"); errSend != nil {
-				log.Printf("Failed to send 'Email not valid' message: %v", errSend)
+			if err := tb.SendMessage("Email not valid!"); err != nil {
+				log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed to send 'Email not valid' message: %v").String(), err)
 			}
 			email = ""
 			continue
 		}
+		email = strings.ToLower(email)
 		cfg.SetCred(email, password)
 	}
 
 	// User request for password if needed
 
+	// TODO: test for multiple user wrong input
 	for password == "" {
-		password, err = telegramBot.RequestUserInput(fmt.Sprintf("Enter your password for %s, please...", email))
+		password, err = tb.RequestUserInput(fmt.Sprintf("Enter your password for %s, please...", email))
 		if err != nil {
-			log.Printf("Error getting username: %v", err)
+			log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Red("Error getting username: %v").String(), err)
 			continue
 		}
 		imap.RetryCount = 0
 		c, err := imap.New(email, password, cfg.EmailImapHost, cfg.EmailImapPort)
 		if err != nil {
-			log.Printf("Failed to login to server: %v", err)
-			if errSend := telegramBot.SendMessage("Wrong password!"); errSend != nil {
-				log.Printf("Failed to send 'Wrong password' message: %v", errSend)
+			log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed to login to server: %v").String(), err)
+			if err := tb.SendMessage("Wrong password!"); err != nil {
+				log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed to send 'Wrong password' message: %v").String(), err)
 			}
 			password = ""
 			continue
@@ -190,25 +156,25 @@ func main() {
 		email,
 		password,
 		func() {
-			processNewEmails(emailClient, telegramBot, openAIClient)
+			processNewEmails(emailClient, tb, ai)
 		})
 	if err != nil {
-		log.Fatalf("Failed to init email client: %v", err)
+		log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red(aurora.Bold("Failed to init email client: %v")).String(), err)
 	}
 	defer emailClient.Close()
 
 	// Telegram listener
 
-	go telegramBot.StartListener(
+	go tb.StartListener(
 		func(uid int, message string, files []struct{ Url, Name string }) {
-			replayToEmail(emailClient, telegramBot, uid, message, files)
+			replayToEmail(emailClient, tb, uid, message, files)
 		},
 		func(to string, title string, message string, files []struct{ Url, Name string }) {
-			sendNewEmail(emailClient, telegramBot, to, title, message, files)
+			sendNewEmail(emailClient, tb, to, title, message, files)
 		},
 	)
 
-	processNewEmails(emailClient, telegramBot, openAIClient)
+	processNewEmails(emailClient, tb, ai)
 
 	// Graceful shutdown
 
@@ -218,103 +184,99 @@ func main() {
 	// Waiting signal OS
 
 	<-signalChan
-	log.Println("Shutdown signal received")
+	log.Println(au.Gray(12, "[END]").String() + " " + au.Yellow("Shutdown signal received").String())
 }
 
 var mu sync.Mutex
 
-func processNewEmails(emailClient *EmailClient, telegramBot *TelegramBot, openAIClient *OpenAIClient) {
+func processNewEmails(ec *EmailClient, tb *TelegramBot, ai *OpenAIClient) {
+
+	// Stopping idle mode
 
 	mu.Lock()
-	emailClient.imap.StopIdle()
+	ec.imap.StopIdle()
 	defer func() {
-		if err := emailClient.startIdleWithHandler(); err != nil {
-			telegramBot.SendMessage("Failed to reply email for!")
+		if err := ec.startIdleWithHandler(); err != nil {
+			tb.SendMessage("Failed to reply email for!")
 			return
 		}
 		mu.Unlock()
 	}()
 
-	log.Println("Checking for new emails...")
-	uids, err := emailClient.ListNewMailUIDs()
+	// Get new mail ids
+
+	log.Println(au.Gray(12, "[EMAIL]").String() + " " + au.Cyan("Checking for new emails...").String())
+	uids, err := ec.ListNewMailUIDs()
 	if err != nil {
-		log.Printf("Error listing emails: %v", err)
+		log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Red("Error listing emails: %v").String(), err)
 		return
 	}
 
 	// If first star, ignore all letters
 
-	if uids, err = emailClient.AddAllUIDsIfFirstStart(uids); err != nil {
-		log.Printf("Error marking UIDs as processed on first start: %v", err)
+	if uids, err = ec.AddAllUIDsIfFirstStart(uids); err != nil {
+		log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Red("Error marking UIDs as processed on first start: %v").String(), err)
 		return
 	}
 
 	// Main cycle for new letters
 
 	for _, uid := range uids {
-		mail, err := emailClient.FetchMail(uid)
+		m, err := ec.FetchMail(uid)
 		if err != nil {
-			log.Printf("Error fetching email %d: %v", uid, err)
+			log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Red("Error fetching email %d: %v").String(), uid, err)
 			continue
 		}
-		emailData := ParseEmail(mail, uid)
+		d := ParseEmail(m, uid)
 
 		isCode := false
 		isSpam := false
-		if openAIClient != nil && emailData != nil && emailData.TextBody != "" {
-			log.Printf("Attempting to process email UID %d with OpenAI...", uid)
-			result, err := openAIClient.GenerateTextFromEmail(emailData.Subject + " " + emailData.From + " " + emailData.TextBody)
+		if ai != nil && d != nil && d.TextBody != "" {
+			log.Printf(au.Gray(12, "[OPENAI]").String()+" "+au.Magenta("Attempting to process email UID %d with OpenAI...").String(), uid)
+			res, err := ai.GenerateTextFromEmail(d.Subject + " " + d.From + " " + d.TextBody)
 			if err != nil {
-				log.Printf("Failed to process email UID %d with OpenAI: %v. Sending original email.", uid, err)
+				log.Printf(au.Gray(12, "[OPENAI]").String()+" "+au.Red("Failed to process email UID %d with OpenAI: %v. Sending original email.").String(), uid, err)
 			}
-			isSpam = result.IsSpam
+			isSpam = res.IsSpam
 		}
 
-		if err := telegramBot.SendEmailData(emailData, isCode, isSpam); err != nil {
-			log.Printf("Error sending email %d to Telegram: %v", uid, err)
+		if err := tb.SendEmailData(d, isCode, isSpam); err != nil {
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Red("Error sending email %d to Telegram: %v").String(), uid, err)
 			continue
 		}
-		if err := emailClient.MarkUIDAsProcessed(uid); err != nil {
-			log.Printf("Error marking email %d as processed: %v", uid, err)
+		if err := ec.MarkUIDAsProcessed(uid); err != nil {
+			log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Red("Error marking email %d as processed: %v").String(), uid, err)
 		}
 	}
 
 }
 
-func replayToEmail(emailClient *EmailClient, telegramBot *TelegramBot, uid int, message string, files []struct{ Url, Name string }) {
+func replayToEmail(ec *EmailClient, tb *TelegramBot, uid int, msg string, files []struct{ Url, Name string }) {
 
 	mu.Lock()
-	emailClient.imap.StopIdle()
-	defer func() {
-		if err := emailClient.startIdleWithHandler(); err != nil {
-			telegramBot.SendMessage("Failed to reply email for!")
-			return
-		}
-		mu.Unlock()
-	}()
-
-	err := emailClient.ReplyTo(uid, message, files)
+	ec.imap.StopIdle()
+	err := ec.ReplyTo(uid, msg, files)
 	if err != nil {
-		telegramBot.SendMessage("Failed to reply email for!")
+		tb.SendMessage("Failed to reply email for!")
 	}
+	if err := ec.startIdleWithHandler(); err != nil {
+		log.Fatalf(au.Gray(12, "[EMAIL]").String()+" "+au.Red(aurora.Bold("Failed to restart idle mode: %v")).String(), err)
+	}
+	mu.Unlock()
 
 }
 
-func sendNewEmail(emailClient *EmailClient, telegramBot *TelegramBot, to, title, message string, files []struct{ Url, Name string }) {
+func sendNewEmail(ec *EmailClient, tb *TelegramBot, to, subj, msg string, files []struct{ Url, Name string }) {
 
 	mu.Lock()
-	emailClient.imap.StopIdle()
-	defer func() {
-		if err := emailClient.startIdleWithHandler(); err != nil {
-			telegramBot.SendMessage("Failed to send email!")
-			return
-		}
-		mu.Unlock()
-	}()
-
-	err := emailClient.SendMail([]string{to}, title, message, files)
+	ec.imap.StopIdle()
+	err := ec.SendMail([]string{to}, subj, msg, files)
 	if err != nil {
-		telegramBot.SendMessage("Failed to send email!")
+		tb.SendMessage("Failed to send email!")
 	}
+	if err := ec.startIdleWithHandler(); err != nil {
+		log.Fatalf(au.Gray(12, "[EMAIL]").String()+" "+au.Red(aurora.Bold("Failed to restart idle mode: %v")).String(), err)
+	}
+	mu.Unlock()
 
 }
