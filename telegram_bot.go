@@ -187,81 +187,34 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool)
 		}
 	}
 
-	// if code message
+	// Send code message
 
 	if isCode {
-		if !tb.isChat {
-			if err := tb.sendMessage(tid, "🔑 <b>"+data.Subject+"\n\n"+data.From+"\n⤷ "+data.To+"</b>"+telehtml.EncodeIntInvisible(data.Uid)); err != nil {
-				return fmt.Errorf("failed to send title message (code) with Telego: %w", err)
-			}
-			if err := tb.sendMessage(tid, data.TextBody); err != nil {
-				return fmt.Errorf("failed to send code message body with Telego: %w", err)
-			}
-		} else {
-			if err := tb.sendMessage(tid, data.TextBody); err != nil {
-				return fmt.Errorf("failed to send code message to topic %s with Telego: %w", tid, err)
-			}
+		if err := tb.sendCode(tid, data); err != nil {
+			return err
 		}
 		return nil
 	}
 
-	// Header + text, then split
+	// Send spam message
 
-	body := data.TextBody
-	if !tb.isChat {
-		header := "<b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>" + "\n\n"
-		if isSpam {
-			header = "🚫 " + header
-		} else {
-			header = "✉️ " + header
+	if isSpam {
+		if err := tb.sendSpam(data); err != nil {
+			return err
 		}
-		body = header + data.TextBody
+		return nil
 	}
-	messages := telehtml.SplitTelegramHTML(body + telehtml.EncodeIntInvisible(data.Uid))
 
-	// Send messages
+	// Send text message
 
-	for i, msg := range messages {
-		if len(msg) > 0 {
-			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending message part %d/%d").String(), i+1, len(messages))
-			if err := tb.sendMessage(tid, msg); err != nil {
-				return fmt.Errorf("failed to send main part with Telego: %w", err)
-			}
-		}
+	if err := tb.sendText(tid, data); err != nil {
+		return err
 	}
 
 	// Send sttachments
 
-	if len(data.Attachments) > 0 {
-		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Sending %d attachments").String(), len(data.Attachments))
-		for filename, contentBytes := range data.Attachments {
-			if len(contentBytes) == 0 {
-				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Skipping empty attachment: %s").String(), filename)
-				continue
-			}
-			inputFile := tu.FileFromReader(bytes.NewReader(contentBytes), filename)
-
-			var docParams *telego.SendDocumentParams
-
-			if !tb.isChat {
-				docParams = tu.Document(tu.ID(tb.recipientId), inputFile)
-			} else {
-				tidInt64, err := strconv.ParseInt(tid, 10, 64)
-				if err != nil {
-					return err
-				}
-				docParams = tu.Document(tu.ID(tb.recipientId), inputFile).
-					WithMessageThreadID(int(tidInt64))
-			}
-			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending attachment: %s (%d bytes)").String(), filename, len(contentBytes))
-			if _, err := tb.api.SendDocument(tb.ctx, docParams); err != nil {
-				target := "direct message"
-				if tb.isChat {
-					target = fmt.Sprintf("topic %s", tid)
-				}
-				return fmt.Errorf("failed to send attachment %s to %s (email UID %d) with Telego: %w", filename, target, data.Uid, err)
-			}
-		}
+	if err := tb.sendAttachments(tid, data); err != nil {
+		return err
 	}
 
 	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Green("Email data sent successfully").String())
@@ -480,15 +433,105 @@ func (tb *TelegramBot) sendMessage(tid, text string) error {
 	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Sending message to topic %s").String(), tid)
 	p := tu.Message(tu.ID(tb.recipientId), text)
 	p.ParseMode = telego.ModeHTML
-	tidInt64, err := strconv.ParseInt(tid, 10, 64)
-	if err != nil {
-		return err
+	if len(tid) > 0 {
+		tidInt64, err := strconv.ParseInt(tid, 10, 64)
+		if err != nil {
+			return err
+		}
+		p.MessageThreadID = int(tidInt64)
 	}
-	p.MessageThreadID = int(tidInt64)
 	p.LinkPreviewOptions = &telego.LinkPreviewOptions{IsDisabled: true}
 	if _, err := tb.api.SendMessage(tb.ctx, p); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func (tb *TelegramBot) sendCode(tid string, data *ParsedEmailData) error {
+
+	if !tb.isChat {
+		if err := tb.sendMessage("", "🔑 <b>"+data.Subject+"\n\n"+data.From+"\n⤷ "+data.To+"</b>"+telehtml.EncodeIntInvisible(data.Uid)); err != nil {
+			return fmt.Errorf("failed to send title message (code) with Telego: %w", err)
+		}
+		if err := tb.sendMessage("", data.TextBody); err != nil {
+			return fmt.Errorf("failed to send code message body with Telego: %w", err)
+		}
+	} else {
+		if err := tb.sendMessage("", "<b>"+data.From+"\n⤷ "+data.To+"</b>"+telehtml.EncodeIntInvisible(data.Uid)); err != nil {
+			return fmt.Errorf("failed to send title message (code) with Telego: %w", err)
+		}
+		if err := tb.sendMessage(tid, data.TextBody); err != nil {
+			return fmt.Errorf("failed to send code message to topic %s with Telego: %w", tid, err)
+		}
+	}
+
+	return nil
+
+}
+
+func (tb *TelegramBot) sendSpam(data *ParsedEmailData) error {
+
+	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Blue("Sending spam message").String())
+	if err := tb.sendMessage("", "🚫 <b>"+data.Subject+"\n\n"+data.From+"\n⤷ "+data.To+"</b>\n\n"+data.TextBody+telehtml.EncodeIntInvisible(data.Uid)); err != nil {
+		return fmt.Errorf("failed to send main part with Telego: %w", err)
+	}
+
+	return nil
+
+}
+
+func (tb *TelegramBot) sendText(tid string, data *ParsedEmailData) error {
+
+	var messages []string
+	if !tb.isChat {
+		messages = telehtml.SplitTelegramHTML("✉️ <b>" + data.Subject + "\n\n" + data.From + "\n⤷ " + data.To + "</b>\n\n" + data.TextBody)
+		tid = ""
+	} else {
+		messages = telehtml.SplitTelegramHTML("<b>" + data.From + "\n⤷ " + data.To + "</b>\n\n" + data.TextBody)
+	}
+	for i, msg := range messages {
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending message part %d/%d").String(), i+1, len(messages))
+		if err := tb.sendMessage(tid, msg+telehtml.EncodeIntInvisible(data.Uid)); err != nil {
+			return fmt.Errorf("failed to send main part with Telego: %w", err)
+		}
+	}
+
+	return nil
+
+}
+
+func (tb *TelegramBot) sendAttachments(tid string, data *ParsedEmailData) error {
+
+	if len(data.Attachments) > 0 {
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Sending %d attachments").String(), len(data.Attachments))
+		for fn, b := range data.Attachments {
+			if len(b) == 0 {
+				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Skipping empty attachment: %s").String(), fn)
+				continue
+			}
+			f := tu.FileFromReader(bytes.NewReader(b), fn)
+			var p *telego.SendDocumentParams
+			if !tb.isChat {
+				p = tu.Document(tu.ID(tb.recipientId), f)
+			} else {
+				tidInt64, err := strconv.ParseInt(tid, 10, 64)
+				if err != nil {
+					return err
+				}
+				p = tu.Document(tu.ID(tb.recipientId), f).WithMessageThreadID(int(tidInt64))
+			}
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending attachment: %s (%d bytes)").String(), fn, len(b))
+			if _, err := tb.api.SendDocument(tb.ctx, p); err != nil {
+				target := "direct message"
+				if tb.isChat {
+					target = fmt.Sprintf("topic %s", tid)
+				}
+				return fmt.Errorf("failed to send attachment %s to %s (email UID %d) with Telego: %w", fn, target, data.Uid, err)
+			}
+		}
+	}
+
+	return nil
+
 }
