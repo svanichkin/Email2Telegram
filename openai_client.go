@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 
@@ -19,8 +20,10 @@ type OpenAIClient struct {
 func NewOpenAIClient(token string) (*OpenAIClient, error) {
 
 	if token == "" {
+		log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Yellow("No OpenAI token provided, client will be disabled").String())
 		return nil, nil
 	}
+	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Cyan("Initializing OpenAI client...").String())
 	client := openai.NewClient(token)
 
 	systemPrompt := `Проанализируй следующее письмо и определи, является ли оно спамом. Верни результат в формате JSON:
@@ -44,6 +47,7 @@ func NewOpenAIClient(token string) (*OpenAIClient, error) {
 
 Ты помощник, который кратко пересказывает email-сообщения на языке письма. Не добавляй ничего от себя.`
 
+	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Green(au.Bold("OpenAI client initialized successfully")).String())
 	return &OpenAIClient{
 		client:       client,
 		systemPrompt: systemPrompt,
@@ -57,14 +61,15 @@ type EmailAnalysisResult struct {
 }
 
 func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysisResult, error) {
+
 	if oac.client == nil {
 		return nil, errors.New("OpenAI client not initialized")
 	}
-
 	if emailText == "" {
 		return nil, errors.New("email text is empty")
 	}
 
+	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Magenta("Analyzing email content with OpenAI...").String())
 	resp, err := oac.client.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
@@ -92,6 +97,7 @@ func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysis
 		return nil, errors.New("OpenAI returned no choices")
 	}
 
+	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Blue("Received response from OpenAI, processing...").String())
 	content := cleanOpenAIResponse(resp.Choices[0].Message.Content)
 
 	var result EmailAnalysisResult
@@ -99,11 +105,13 @@ func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysis
 		return nil, fmt.Errorf("failed to parse OpenAI response as JSON: %w\nResponse: %s", err, content)
 	}
 
+	log.Printf(au.Gray(12, "[OPENAI]").String()+" "+au.Green("Analysis completed. IsSpam: %t, Code found: %t, Summary: %t").String(), result.IsSpam, result.Code != "", result.Summary != "")
 	return &result, nil
 }
 
 func cleanOpenAIResponse(resp string) string {
 
+	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Cyan("Cleaning OpenAI response...").String())
 	re := regexp.MustCompile("(?s)^```json\\s*(.*)\\s*```$|^```\\s*(.*)\\s*```$")
 	matches := re.FindStringSubmatch(resp)
 	if len(matches) > 0 {
