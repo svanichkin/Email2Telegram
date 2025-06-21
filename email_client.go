@@ -366,7 +366,7 @@ func (ec *EmailClient) SendMail(to []string, title string, message string, files
 
 	// Send
 
-	log.Printf(au.Gray(12, "[EMAIL]").String() + " " + au.Magenta("Sending email via SMTP").String())
+	log.Println(au.Gray(12, "[EMAIL]").String() + " " + au.Magenta("Sending email via SMTP").String())
 	err := smtp.SendMail(
 		fmt.Sprintf("%s:%d", ec.smtpHost, ec.smtpPort),
 		smtp.PlainAuth("", ec.username, ec.password, ec.smtpHost),

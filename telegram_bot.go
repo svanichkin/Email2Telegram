@@ -27,6 +27,7 @@ type TelegramBot struct {
 
 func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
 
+	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Cyan("Initializing Telegram bot...").String())
 	bot, err := telego.NewBot(apiToken, telego.WithDiscardLogger())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Telegram bot with Telego: %w", err)
@@ -38,12 +39,13 @@ func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bot info (GetMe) with Telego: %w", err)
 	}
-	log.Printf("Authorized on account %s", botUser.Username)
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Green("Authorized as @%s").String(), botUser.Username)
 	updates, err := bot.UpdatesViaLongPolling(context.Background(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get updates channel from Telego: %w", err)
 	}
 
+	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Green(au.Bold("Bot initialized successfully")).String())
 	return &TelegramBot{
 		api:         bot,
 		recipientId: recipientID,
@@ -56,6 +58,7 @@ func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
 
 func (t *TelegramBot) StartListener(replayMessage func(uid int, message string, files []struct{ Url, Name string }), newMessage func(to string, title string, message string, files []struct{ Url, Name string })) {
 
+	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Cyan("Starting message listener...").String())
 	if t.ctx == nil {
 		t.ctx = context.Background()
 	}
@@ -69,28 +72,32 @@ func (t *TelegramBot) StartListener(replayMessage func(uid int, message string, 
 
 func (tb *TelegramBot) SendMessage(msg string) error {
 
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Sending message to %d").String(), tb.recipientId)
 	message := tu.Message(
 		tu.ID(tb.recipientId),
 		msg,
 	)
 	_, err := tb.api.SendMessage(tb.ctx, message)
 	if err != nil {
-		log.Printf("Error sending message with Telego: %v", err)
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Red("Error sending message: %v").String(), err)
 		return fmt.Errorf("failed to send message via Telego: %w", err)
 	}
 
+	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Green("Message sent successfully").String())
 	return nil
 
 }
 
 func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 
+	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Cyan("Requesting user input...").String())
 	if tb.api == nil {
 		return "", errors.New("telego API is not initialized")
 	}
 	if tb.ctx == nil {
 		tb.ctx = context.Background()
 	}
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending prompt: %s").String(), prompt)
 	message := tu.Message(
 		tu.ID(tb.recipientId),
 		prompt,
@@ -111,24 +118,24 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 		select {
 		case update, ok := <-tb.updates:
 			if !ok {
-				log.Println("Updates channel closed unexpectedly in RequestUserInput")
+				log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Red("Updates channel closed").String())
 				return "", errors.New("updates channel closed")
 			}
 			if update.Message == nil {
 				continue
 			}
 			if update.Message.Chat.ID == tb.recipientId {
-				log.Printf("Received reply: %s", update.Message.Text)
+				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Green("Received reply: %s").String(), update.Message.Text)
 				return update.Message.Text, nil
 			}
 			fromID := int64(0)
 			if update.Message.From != nil {
 				fromID = update.Message.From.ID
 			}
-			log.Printf("RequestUserInput: Ignored message in chat %d from user %d (expected chat %d)", update.Message.Chat.ID, fromID, tb.recipientId)
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Ignored message from chat %d, user %d (expected %d)").String(), update.Message.Chat.ID, fromID, tb.recipientId)
 
 		case <-timeout:
-			log.Println("Timeout waiting for input reply.")
+			log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Red("Input timeout").String())
 			return "", errors.New("timeout waiting for input reply")
 		}
 	}
@@ -137,6 +144,8 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 
 func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool) error {
 
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Sending email data (UID: %d, IsCode: %t, IsSpam: %t)").String(),
+		data.Uid, isCode, isSpam)
 	if tb.api == nil {
 		return errors.New("telego API is not initialized in SendEmailData")
 	}
@@ -156,7 +165,7 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool)
 		if tb.topics == nil {
 			tb.topics, err = LoadAndDecrypt(rid, rid+".top")
 			if err != nil {
-				log.Printf("Failed to load topics: %v. Starting with empty topics map.", err)
+				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to load topics: %v").String(), err)
 				tb.topics = make(map[string]string)
 			}
 		}
@@ -166,13 +175,14 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool)
 		subj := cleanSubject(data.Subject)
 		tid = tb.topics[subj]
 		if tid == "" {
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Creating new topic for: %s").String(), subj)
 			tid, err = tb.ensureTopic(subj)
 			if err != nil {
 				return fmt.Errorf("topic handling error (ensureTopic failed): %w", err)
 			}
 			tb.topics[subj] = tid
 			if errSave := EncryptAndSave(rid, rid+".top", tb.topics); errSave != nil {
-				log.Printf("Failed to save updated topics: %v", errSave)
+				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to save topics: %v").String(), errSave)
 			}
 		}
 	}
@@ -211,8 +221,9 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool)
 
 	// Send messages
 
-	for _, msg := range messages {
+	for i, msg := range messages {
 		if len(msg) > 0 {
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending message part %d/%d").String(), i+1, len(messages))
 			if err := tb.sendMessage(tid, msg); err != nil {
 				return fmt.Errorf("failed to send main part with Telego: %w", err)
 			}
@@ -222,10 +233,10 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool)
 	// Send sttachments
 
 	if len(data.Attachments) > 0 {
-		// log.Printf("Attempting to send %d attachments for email UID %d", len(data.Attachments), data.Uid)
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Sending %d attachments").String(), len(data.Attachments))
 		for filename, contentBytes := range data.Attachments {
 			if len(contentBytes) == 0 {
-				log.Printf("Skipping attachment '%s' for email UID %d due to empty content.", filename, data.Uid)
+				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Skipping empty attachment: %s").String(), filename)
 				continue
 			}
 			inputFile := tu.FileFromReader(bytes.NewReader(contentBytes), filename)
@@ -242,7 +253,7 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool)
 				docParams = tu.Document(tu.ID(tb.recipientId), inputFile).
 					WithMessageThreadID(int(tidInt64))
 			}
-			// log.Printf("Sending attachment '%s' (size: %d bytes) for email UID %d. Target: chat %d, topic %s (0 if direct)", filename, len(contentBytes), data.Uid, tb.recipientId, tid)
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending attachment: %s (%d bytes)").String(), filename, len(contentBytes))
 			if _, err := tb.api.SendDocument(tb.ctx, docParams); err != nil {
 				target := "direct message"
 				if tb.isChat {
@@ -250,10 +261,10 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool)
 				}
 				return fmt.Errorf("failed to send attachment %s to %s (email UID %d) with Telego: %w", filename, target, data.Uid, err)
 			}
-			// log.Printf("Successfully sent attachment '%s' for email UID %d to chat %d, topic %s", filename, data.Uid, tb.recipientId, tid)
 		}
 	}
 
+	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Green("Email data sent successfully").String())
 	return nil
 }
 
@@ -261,6 +272,7 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool)
 
 func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) (bool, error) {
 
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Checking admin rights for chat %d").String(), chatID)
 	if tb.api == nil {
 		return false, errors.New("telego API is not initialized in CheckAndRequestAdminRights")
 	}
@@ -272,6 +284,7 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) (bool, error) {
 		return false, fmt.Errorf("failed to get bot info (GetMe): %w", err)
 	}
 	bid := bu.ID
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Checking admin status for bot @%s (ID: %d)").String(), bu.Username, bu.ID)
 	cm, err := tb.api.GetChatMember(tb.ctx, &telego.GetChatMemberParams{
 		ChatID: tu.ID(chatID),
 		UserID: bid,
@@ -281,10 +294,10 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) (bool, error) {
 	}
 	switch v := cm.(type) {
 	case *telego.ChatMemberAdministrator, *telego.ChatMemberOwner:
-		log.Printf("Bot already has admin rights in chat %d (status: %s)", chatID, v.MemberStatus())
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Green("Bot has admin rights (status: %s)").String(), v.MemberStatus())
 		return true, nil
 	default:
-		log.Printf("Bot does not have admin rights in chat %d. Status: %s", chatID, v.MemberStatus())
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Bot lacks admin rights (status: %s)").String(), v.MemberStatus())
 		return false, nil
 	}
 
@@ -292,6 +305,7 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) (bool, error) {
 
 func (tb *TelegramBot) CheckTopicsEnabled(chatID int64) (bool, error) {
 
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Checking topics for chat %d").String(), chatID)
 	tb.isChat = false
 	if tb.api == nil {
 		return tb.isChat, errors.New("telego API not initialized in CheckTopicsEnabled")
@@ -305,11 +319,11 @@ func (tb *TelegramBot) CheckTopicsEnabled(chatID int64) (bool, error) {
 	}
 	if chat.IsForum {
 		tb.isChat = true
-		log.Printf("Topics are enabled for chat ID %d.", chatID)
+		log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Green("Topics enabled (forum chat)").String())
 		return tb.isChat, nil
 	}
 
-	log.Printf("Topics are NOT enabled for chat ID %d (IsForum: %v). The chat might not be a forum or topics are disabled.", chatID, chat.IsForum)
+	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Yellow("Topics disabled (not a forum)").String())
 	return tb.isChat, nil
 
 }
@@ -329,11 +343,11 @@ func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(
 	if msg.From != nil {
 		fid = msg.From.ID
 	}
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Processing update from chat %d, user %d").String(), msg.Chat.ID, fid)
 	if msg.Chat.ID != t.recipientId {
-		log.Printf("Ignoring message from unexpected chat: MessageChat.ID=%d, From.ID=%d. Expected recipientID: %d", msg.Chat.ID, fid, t.recipientId)
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Ignoring message from unexpected chat (expected %d)").String(), t.recipientId)
 		return
 	}
-	log.Printf("Processing message from Chat.ID %d (RecipientID: %d), From.ID %d", msg.Chat.ID, t.recipientId, fid)
 
 	// Reply message
 
@@ -346,6 +360,7 @@ func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(
 
 		if uidCode := telehtml.FindInvisibleIntSequences(repliedText); len(uidCode) > 0 {
 			uidToReply := telehtml.DecodeIntInvisible(uidCode[0])
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Processing reply to message UID %d").String(), uidToReply)
 
 			// Group files (album)
 
@@ -355,7 +370,9 @@ func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(
 					for _, m := range albumMsgs {
 						files = append(files, t.getAllFileURLs(m)...)
 					}
-					replayMessageFunc(uidToReply, extractTextFromMessages(albumMsgs), files)
+					text := extractTextFromMessages(albumMsgs)
+					log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Processing album reply with %d files").String(), len(files))
+					replayMessageFunc(uidToReply, text, files)
 				}) {
 					return
 				}
@@ -368,6 +385,7 @@ func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(
 			if body == "" {
 				body = msg.Caption
 			}
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Processing single reply with %d files").String(), len(files))
 			replayMessageFunc(uidToReply, body, files)
 			return
 		}
@@ -391,13 +409,14 @@ func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(
 			}
 			to, title, body, ok := parseMailContent(rawText)
 			if !ok {
-				log.Println("Invalid mail format in album message for new email.")
+				log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Yellow("Invalid mail format in album").String())
 				return
 			}
 			files := []struct{ Url, Name string }{}
 			for _, m := range albumMsgs {
 				files = append(files, t.getAllFileURLs(m)...)
 			}
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Processing new album message with %d files").String(), len(files))
 			newMessageFunc(to, title, body, files)
 		}) {
 			return
@@ -413,13 +432,14 @@ func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(
 
 	to, title, body, ok := parseMailContent(msgText)
 	if !ok {
-		log.Println("Invalid mail format in single message for new email.")
+		log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Yellow("Invalid mail format, sending instructions").String())
 		t.SendMessage("Hi! I'm your mail bot.")
 		t.SendMessage("To reply to an email, just reply to the message and \n\nenter your text, and attach files if needed.")
 		t.SendMessage("To send a new email, use the format:\n\nto.user@mail.example.com\nSubject line\nEmail text\n\nAttach files if needed.")
 		return
 	}
 	files := t.getAllFileURLs(msg)
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Processing new message with %d files").String(), len(files))
 	newMessageFunc(to, title, body, files)
 
 }
@@ -428,6 +448,7 @@ func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(
 
 func (tb *TelegramBot) ensureTopic(subject string) (string, error) {
 
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Ensuring topic exists: %s").String(), subject)
 	if tb.api == nil {
 		return "", errors.New("telego API not initialized in ensureTopic")
 	}
@@ -439,6 +460,7 @@ func (tb *TelegramBot) ensureTopic(subject string) (string, error) {
 		Name:      subject,
 		IconColor: int(0x6FB9F0),
 	}
+	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Blue("Creating new forum topic").String())
 	forumTopic, err := tb.api.CreateForumTopic(tb.ctx, params)
 	if err != nil {
 		return "", fmt.Errorf("telego CreateForumTopic error: %w", err)
@@ -447,12 +469,15 @@ func (tb *TelegramBot) ensureTopic(subject string) (string, error) {
 		return "", errors.New("telego CreateForumTopic returned nil topic")
 	}
 
-	return fmt.Sprint(forumTopic.MessageThreadID), nil
+	tid := fmt.Sprint(forumTopic.MessageThreadID)
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Green("Created topic %s with ID %s").String(), subject, tid)
+	return tid, nil
 
 }
 
 func (tb *TelegramBot) sendMessage(tid, text string) error {
 
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Sending message to topic %s").String(), tid)
 	p := tu.Message(tu.ID(tb.recipientId), text)
 	p.ParseMode = telego.ModeHTML
 	tidInt64, err := strconv.ParseInt(tid, 10, 64)

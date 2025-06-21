@@ -26,7 +26,7 @@ func cleanSubject(subject string) string {
 	}
 	runes := []rune(strings.ToLower(subject))
 	runes[0] = unicode.ToUpper(runes[0])
-	
+
 	return string(runes)
 
 }
@@ -38,6 +38,8 @@ type FileAttachment struct {
 }
 
 func (t *TelegramBot) getFileURL(fileID string) (string, error) {
+
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Getting file URL for ID: %s").String(), fileID)
 	if t.api == nil {
 		return "", errors.New("telego API not initialized in getFileURL")
 	}
@@ -53,102 +55,93 @@ func (t *TelegramBot) getFileURL(fileID string) (string, error) {
 		return "", fmt.Errorf("telego GetFile returned empty file_path for FileID: %s", fileID)
 	}
 
-	// Construct the full URL. Telego Bot object has a method for this.
-	return t.api.FileDownloadURL(file.FilePath), nil
+	url := t.api.FileDownloadURL(file.FilePath)
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Green("Got file URL: %s").String(), url)
+
+	return url, nil
+
 }
 
 func (t *TelegramBot) getAllFileURLs(msg *telego.Message) []struct{ Url, Name string } {
+
+	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Cyan("Processing attachments...").String())
 	files := []struct{ Url, Name string }{}
 	var url string
 	var err error
 
-	if msg.Document != nil {
-		url, err = t.getFileURL(msg.Document.FileID)
-		if err == nil && url != "" {
-			files = append(files, struct{ Url, Name string }{url, msg.Document.FileName})
-		} else if err != nil {
-			log.Printf("Error getting file URL for document %s: %v", msg.Document.FileID, err)
+	processAttachment := func(fileType, fileID, fileName string) {
+		url, err = t.getFileURL(fileID)
+		if err != nil {
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Red("Error getting %s file URL %s: %v").String(),
+				fileType, fileID, err)
+			return
 		}
+		if url == "" {
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Empty URL for %s file %s").String(),
+				fileType, fileID)
+			return
+		}
+		files = append(files, struct{ Url, Name string }{url, fileName})
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Green("Added %s: %s").String(), fileType, fileName)
+	}
+
+	if msg.Document != nil {
+		processAttachment("document", msg.Document.FileID, msg.Document.FileName)
 	}
 	if msg.Audio != nil {
-		url, err = t.getFileURL(msg.Audio.FileID)
-		if err == nil && url != "" {
-			fileName := "audio.mp3"
-			if msg.Audio.FileName != "" {
-				fileName = msg.Audio.FileName
-			}
-			files = append(files, struct{ Url, Name string }{url, fileName})
-		} else if err != nil {
-			log.Printf("Error getting file URL for audio %s: %v", msg.Audio.FileID, err)
+		fileName := "audio.mp3"
+		if msg.Audio.FileName != "" {
+			fileName = msg.Audio.FileName
 		}
+		processAttachment("audio", msg.Audio.FileID, fileName)
 	}
 	if msg.Video != nil {
-		url, err = t.getFileURL(msg.Video.FileID)
-		if err == nil && url != "" {
-			fileName := "video.mp4"
-			if msg.Video.FileName != "" {
-				fileName = msg.Video.FileName
-			}
-			files = append(files, struct{ Url, Name string }{url, fileName})
-		} else if err != nil {
-			log.Printf("Error getting file URL for video %s: %v", msg.Video.FileID, err)
+		fileName := "video.mp4"
+		if msg.Video.FileName != "" {
+			fileName = msg.Video.FileName
 		}
+		processAttachment("video", msg.Video.FileID, fileName)
 	}
 	if msg.Voice != nil {
-		url, err = t.getFileURL(msg.Voice.FileID)
-		if err == nil && url != "" {
-			files = append(files, struct{ Url, Name string }{url, "voice.ogg"}) // Voice usually doesn't have a filename
-		} else if err != nil {
-			log.Printf("Error getting file URL for voice %s: %v", msg.Voice.FileID, err)
-		}
+		processAttachment("voice", msg.Voice.FileID, "voice.ogg")
 	}
 	if msg.Animation != nil {
-		url, err = t.getFileURL(msg.Animation.FileID)
-		if err == nil && url != "" {
-			fileName := "animation.mp4"
-			if msg.Animation.FileName != "" {
-				fileName = msg.Animation.FileName
-			}
-			files = append(files, struct{ Url, Name string }{url, fileName})
-		} else if err != nil {
-			log.Printf("Error getting file URL for animation %s: %v", msg.Animation.FileID, err)
+		fileName := "animation.mp4"
+		if msg.Animation.FileName != "" {
+			fileName = msg.Animation.FileName
 		}
+		processAttachment("animation", msg.Animation.FileID, fileName)
 	}
 	if msg.VideoNote != nil {
-		url, err = t.getFileURL(msg.VideoNote.FileID)
-		if err == nil && url != "" {
-			files = append(files, struct{ Url, Name string }{url, "video_note.mp4"})
-		} else if err != nil {
-			log.Printf("Error getting file URL for video note %s: %v", msg.VideoNote.FileID, err)
-		}
+		processAttachment("video note", msg.VideoNote.FileID, "video_note.mp4")
 	}
 	if len(msg.Photo) > 0 {
-		photo := msg.Photo[len(msg.Photo)-1] // Get the largest photo
-		url, err = t.getFileURL(photo.FileID)
-		if err == nil && url != "" {
-			files = append(files, struct{ Url, Name string }{url, "photo.jpg"}) // Photos don't have explicit server-side filenames
-		} else if err != nil {
-			log.Printf("Error getting file URL for photo %s: %v", photo.FileID, err)
-		}
+		photo := msg.Photo[len(msg.Photo)-1]
+		processAttachment("photo", photo.FileID, "photo.jpg")
 	}
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Green("Found %d attachments").String(), len(files))
 
 	return files
+
 }
 
-func extractTextFromMessages(msgs []*telego.Message) string { // Type changed
+func extractTextFromMessages(msgs []*telego.Message) string {
+
 	for _, m := range msgs {
 		if m.Text != "" {
 			return m.Text
 		}
-		if m.Caption != "" { // telego.Message has Caption string
+		if m.Caption != "" {
 			return m.Caption
 		}
 	}
+
 	return ""
+
 }
 
 func parseMailContent(msgText string) (to, title, body string, ok bool) {
-	// This function only does string manipulation, no changes needed due to Telego.
+
 	firstNL := strings.Index(msgText, "\n")
 	if firstNL == -1 {
 		return
@@ -170,56 +163,57 @@ func parseMailContent(msgText string) (to, title, body string, ok bool) {
 	ok = true
 
 	return
+
 }
 
-func (t *TelegramBot) bufferAlbumMessage(msg *telego.Message, callback func([]*telego.Message)) bool { // Types changed
+func (t *TelegramBot) bufferAlbumMessage(msg *telego.Message, callback func([]*telego.Message)) bool {
+
 	if msg.MediaGroupID == "" {
-		return false // Not part of an album
+		return false
 	}
 
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Buffering album message with ID: %s").String(), msg.MediaGroupID)
 	albumLock.Lock()
 	defer albumLock.Unlock()
 
 	entry, exists := albumBuffer[msg.MediaGroupID]
 	if !exists {
-		entry = &albumEntry{} // albumEntry messages type will need to be *telego.Message
+		entry = &albumEntry{}
 		albumBuffer[msg.MediaGroupID] = entry
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Created new album entry for ID: %s").String(), msg.MediaGroupID)
 	}
 
 	entry.messages = append(entry.messages, msg)
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Added message to album, total: %d").String(), len(entry.messages))
 
-	// If a timer for this album already exists, stop it.
 	if entry.timer != nil {
 		entry.timer.Stop()
+		log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Yellow("Stopped previous timer").String())
 	}
 
-	// Start a new timer. If more messages for this album arrive within the timeout,
-	// this timer will be stopped and reset.
-	entry.timer = time.AfterFunc(1*time.Second, func() { // Duration can be configured
+	entry.timer = time.AfterFunc(1*time.Second, func() {
 		albumLock.Lock()
 		defer albumLock.Unlock()
 
-		// Ensure the entry still exists, as it might have been processed and deleted by a rapid succession of events.
-		// This check is mostly for safety, as the timer should be the one to delete it.
 		currentEntry, stillExists := albumBuffer[msg.MediaGroupID]
-		if !stillExists || currentEntry != entry { // If entry changed or deleted, this timer is stale
+		if !stillExists || currentEntry != entry {
+			log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Yellow("Stale timer, album entry changed or deleted").String())
 			return
 		}
 
-		// Process the buffered messages
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Green("Processing album with %d messages").String(), len(currentEntry.messages))
 		callback(currentEntry.messages)
-
-		// Remove the album from the buffer after processing
 		delete(albumBuffer, msg.MediaGroupID)
 	})
 
-	return true // Message was buffered
+	return true
+
 }
 
 type albumEntry struct {
-	messages []*telego.Message // Type changed
+	messages []*telego.Message
 	timer    *time.Timer
 }
 
-var albumBuffer = make(map[string]*albumEntry) // Key: MediaGroupID, Value: albumEntry
+var albumBuffer = make(map[string]*albumEntry)
 var albumLock sync.Mutex
