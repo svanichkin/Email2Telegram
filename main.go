@@ -2,19 +2,63 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/mail"
 	"os"
 	"os/signal"
 	"path/filepath" // Added for strings.TrimSpace
+	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/BrianLeishman/go-imap"
+	"github.com/logrusorgru/aurora/v4"
 	// tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5" // Will be removed if all direct uses are gone
 )
 
+var au aurora.Aurora
+
+type colorWriter struct {
+	io.Writer
+}
+
+func (cw *colorWriter) Write(p []byte) (n int, err error) {
+	s := string(p)
+	timestampAndRest := strings.SplitN(s, " ", 2)
+	if len(timestampAndRest) != 2 {
+		return cw.Writer.Write(p) // Default if format is unexpected
+	}
+	timestamp := timestampAndRest[0]
+	message := strings.TrimSuffix(timestampAndRest[1], "\n") // Trim newline for coloring
+
+	var coloredMessage aurora.Value
+	switch {
+	case strings.HasPrefix(message, "Failed to") || strings.HasPrefix(message, "Critical configuration error:") || strings.HasPrefix(message, "Error "):
+		coloredMessage = au.Red(message)
+	case strings.HasPrefix(message, "Warning:"):
+		coloredMessage = au.Yellow(message)
+	case strings.HasPrefix(message, "Successfully") || strings.HasPrefix(message, "Sent ") || strings.HasPrefix(message, "Operating in"):
+		coloredMessage = au.Green(message)
+	case strings.HasPrefix(message, "Note:"):
+		coloredMessage = au.Cyan(message)
+	case strings.HasPrefix(message, "Starting Email Processor..."): // Specific case for the first message
+		coloredMessage = au.Cyan(message)
+	default:
+		coloredMessage = au.BrightBlack(message) // Default color for other messages
+	}
+	// Add newline back after coloring
+	return cw.Writer.Write([]byte(au.Gray(10, timestamp).String() + " " + coloredMessage.String() + "\n"))
+}
+
 func main() {
+	au = aurora.New(aurora.WithColors(true))
+	log.SetOutput(&colorWriter{Writer: os.Stderr})
+	// log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds) // Keep existing flags, colorWriter will handle the coloring part
+	// No need to set flags if we want the default log.LstdFlags (date and time)
+	// The colorWriter will receive the full log line including the prefix set by log.SetFlags()
+	// Let's keep the default flags, which include date and time. Microseconds might be too verbose.
+	// The au.Cyan in log.Println below will be handled by the colorWriter now.
 
 	log.Println("Starting Email Processor...")
 
