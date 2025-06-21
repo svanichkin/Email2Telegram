@@ -38,6 +38,7 @@ type EmailClient struct {
 func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int, username string, password string, callback func()) (*EmailClient, error) {
 
 	// Load last process UID
+
 	processedUIDFile = username
 	uid, err := loadLastProcessedUID(processedUIDFile)
 	if err != nil {
@@ -47,7 +48,7 @@ func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int
 	// Create IMAP client
 
 	serverAddr := fmt.Sprintf("%s:%d", imapHost, imapPort)
-	log.Printf("Try connecting to IMAP server: %s", serverAddr)
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Cyan("Connecting to IMAP server: %s").String(), serverAddr)
 
 	imap.RetryCount = 100
 	// imap.Verbose = true
@@ -58,17 +59,18 @@ func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int
 
 	idleHandler := imap.IdleHandler{
 		OnExists: func(event imap.ExistsEvent) {
-			log.Println("[IDLE] New email arrived:", event.MessageIndex)
+			log.Println(au.Gray(12, "[EMAIL]").String()+" "+au.Green("New email arrived: %d").String(), event.MessageIndex)
 			callback()
 		},
 		OnExpunge: func(event imap.ExpungeEvent) {
-			log.Println("[IDLE] Email expunged:", event.MessageIndex)
+			log.Println(au.Gray(12, "[EMAIL]").String()+" "+au.Yellow("Email expunged: %d").String(), event.MessageIndex)
 		},
 		OnFetch: func(event imap.FetchEvent) {
-			log.Println("[IDLE] Email fetched:", event.MessageIndex, event.UID)
+			log.Println(au.Gray(12, "[EMAIL]").String()+" "+au.Blue("Email fetched: %d, UID: %d").String(), event.MessageIndex, event.UID)
 		},
 	}
 
+	log.Println(au.Gray(12, "[EMAIL]").String() + " " + au.Green(au.Bold("Email client initialized successfully")).String())
 	return &EmailClient{
 		imap: c,
 
@@ -92,9 +94,11 @@ func (ec *EmailClient) reconnectIfNeeded() error {
 	// IMAP reconnect
 
 	if !ec.imap.Connected {
+		log.Println(au.Gray(12, "[EMAIL]").String() + " " + au.Yellow("Reconnecting to IMAP server...").String())
 		if err := ec.imap.Reconnect(); err != nil {
 			return err
 		}
+		log.Println(au.Gray(12, "[EMAIL]").String() + " " + au.Green("Reconnected successfully").String())
 	}
 
 	return nil
@@ -106,12 +110,12 @@ func (ec *EmailClient) Close() {
 	// IMAP Close
 
 	if ec.imap != nil {
-		log.Println("IMAP logging out...")
+		log.Println(au.Gray(12, "[EMAIL]").String() + " " + au.Cyan("Logging out from IMAP...").String())
 		err := ec.imap.Close()
 		if err != nil {
-			log.Printf("Error during logout: %v", err)
+			log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Red("Error during logout: %v").String(), err)
 		} else {
-			log.Println("Logged out successfully")
+			log.Println(au.Gray(12, "[EMAIL]").String() + " " + au.Green("Logged out successfully").String())
 		}
 	}
 
@@ -121,7 +125,6 @@ func (ec *EmailClient) Close() {
 
 func (ec *EmailClient) startIdleWithHandler() error {
 
-	log.Println("(Re)starting IDLE mode")
 	folder := "INBOX"
 	if err := ec.selectFolder(folder); err != nil {
 		return err
@@ -146,6 +149,7 @@ func (ec *EmailClient) FetchMail(uid int) (*imap.Email, error) {
 	if err := ec.selectFolder(folder); err != nil {
 		return nil, err
 	}
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Cyan("Fetching email UID %d from %s").String(), uid, folder)
 	emails, err := ec.imap.GetEmails(int(uid))
 	if err != nil {
 		return nil, err
@@ -160,7 +164,7 @@ func (ec *EmailClient) FetchMail(uid int) (*imap.Email, error) {
 func (ec *EmailClient) selectFolder(folder string) error {
 
 	if ec.imap.Folder != folder {
-		log.Println("Selecting " + folder + " for FetchMail...")
+		log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Blue("Selecting folder: %s").String(), folder)
 		err := ec.imap.SelectFolder(folder)
 		if err != nil {
 			return fmt.Errorf("failed to select "+folder+" for fetch: %w", err)
@@ -186,11 +190,12 @@ func (ec *EmailClient) ListNewMailUIDs() ([]int, error) {
 	if err := ec.selectFolder(folder); err != nil {
 		return nil, err
 	}
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Cyan("Searching for new UIDs in %s").String(), folder)
 	newUIDs, err := ec.imap.GetUIDs("UID " + strconv.Itoa(ec.lastProcessedUID) + ":* UNDELETED")
 	if err != nil {
 		return nil, fmt.Errorf("UID search failed: %w", err)
 	}
-	log.Printf("Found total %d UIDs in %s", len(newUIDs), folder)
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Blue("Found total %d UIDs in %s").String(), len(newUIDs), folder)
 
 	// Unprocessed UIDs
 
@@ -203,7 +208,7 @@ func (ec *EmailClient) ListNewMailUIDs() ([]int, error) {
 		}
 	}
 	sort.Slice(unprocessed, func(i, j int) bool { return unprocessed[i] < unprocessed[j] })
-	log.Printf("Found %d new unprocessed UIDs", len(unprocessed))
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Green("Found %d new unprocessed UIDs").String(), len(unprocessed))
 
 	return unprocessed, nil
 }
@@ -215,6 +220,7 @@ func (ec *EmailClient) MarkUIDAsProcessed(uid int) error {
 		ec.lastProcessedUID = uid
 	}
 	ec.dataMu.Unlock()
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Blue("Marking UID %d as processed").String(), uid)
 
 	return saveLastProcessedUID(processedUIDFile, ec.lastProcessedUID)
 }
@@ -236,7 +242,7 @@ func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []int) ([]int, error) {
 		ec.dataMu.Lock()
 		ec.lastProcessedUID = maxUID
 		ec.dataMu.Unlock()
-		log.Printf("Saved initial last UID %d to %s", maxUID, processedUIDFile)
+		log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Green("Saved initial last UID %d to %s").String(), maxUID, processedUIDFile)
 
 		return nil, nil
 	}
@@ -252,6 +258,7 @@ func loadLastProcessedUID(filePath string) (int, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			log.Println(au.Gray(12, "[EMAIL]").String() + " " + au.Yellow("No existing UID file found, starting fresh").String())
 			return 0, nil
 		}
 		return 0, fmt.Errorf("failed to open UID file: %w", err)
@@ -270,6 +277,7 @@ func loadLastProcessedUID(filePath string) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("invalid last UID: %w", err)
 		}
+		log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Blue("Loaded last processed UID: %d").String(), uid)
 		return int(uid), nil
 	}
 
@@ -278,6 +286,7 @@ func loadLastProcessedUID(filePath string) (int, error) {
 
 func saveLastProcessedUID(filePath string, uid int) error {
 
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Cyan("Saving last processed UID %d to %s").String(), uid, filePath)
 	return os.WriteFile(filePath, []byte(fmt.Sprintf("%d\n", uid)), 0600)
 
 }
@@ -291,6 +300,7 @@ func (ec *EmailClient) ReplyTo(uid int, message string, files []struct{ Url, Nam
 	if err := ec.reconnectIfNeeded(); err != nil {
 		return fmt.Errorf("failed to reconnect: %w", err)
 	}
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Cyan("Preparing reply to email UID %d").String(), uid)
 
 	// Get original mail
 
@@ -314,7 +324,7 @@ func (ec *EmailClient) ReplyTo(uid int, message string, files []struct{ Url, Nam
 	addresses := mail.From
 	if len(mail.ReplyTo) > 0 {
 		addresses = mail.ReplyTo
-		log.Printf("Using Reply-To address %v instead of From %v", mail.ReplyTo, mail.From)
+		log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Blue("Using Reply-To address %v instead of From %v").String(), mail.ReplyTo, mail.From)
 	}
 	var to []string
 	for address := range addresses {
@@ -324,6 +334,7 @@ func (ec *EmailClient) ReplyTo(uid int, message string, files []struct{ Url, Nam
 
 	// Send
 
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Magenta("Sending reply via SMTP to %v").String(), to)
 	err = smtp.SendMail(
 		fmt.Sprintf("%s:%d", ec.smtpHost, ec.smtpPort),
 		smtp.PlainAuth("", ec.username, ec.password, ec.smtpHost),
@@ -335,12 +346,13 @@ func (ec *EmailClient) ReplyTo(uid int, message string, files []struct{ Url, Nam
 		return fmt.Errorf("smtp error: %s", err)
 	}
 
-	log.Printf("Successfully sent reply to email %d", uid)
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Green(au.Bold("Successfully sent reply to email %d")).String(), uid)
 	return nil
 }
 
 func (ec *EmailClient) SendMail(to []string, title string, message string, files []struct{ Url, Name string }) error {
 
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Cyan("Preparing new email to %s").String(), strings.Join(to, ", "))
 	var attachments string
 	if len(files) > 0 {
 		attachments += "<ul>"
@@ -354,6 +366,7 @@ func (ec *EmailClient) SendMail(to []string, title string, message string, files
 
 	// Send
 
+	log.Printf(au.Gray(12, "[EMAIL]").String() + " " + au.Magenta("Sending email via SMTP").String())
 	err := smtp.SendMail(
 		fmt.Sprintf("%s:%d", ec.smtpHost, ec.smtpPort),
 		smtp.PlainAuth("", ec.username, ec.password, ec.smtpHost),
@@ -364,7 +377,7 @@ func (ec *EmailClient) SendMail(to []string, title string, message string, files
 	if err != nil {
 		return fmt.Errorf("smtp error: %s", err)
 	}
-	log.Printf("Successfully sent email to %s", strings.Join(to, ", "))
+	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Green(au.Bold("Successfully sent email to %s")).String(), strings.Join(to, ", "))
 
 	return nil
 }
