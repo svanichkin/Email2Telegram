@@ -11,7 +11,7 @@ import (
 	"syscall"
 
 	"github.com/BrianLeishman/go-imap"
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	// tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5" // Will be removed if all direct uses are gone
 )
 
 func main() {
@@ -48,31 +48,31 @@ func main() {
 		log.Fatalf("Failed to init Telegram bot: %v", err)
 	}
 
-	if cfg.TelegramChatID != 0 {
+	if cfg.TelegramChatID != 0 { // This implies recipientID for the bot is cfg.TelegramChatID
 
 		// Check if admin are enabled for the chat
-
 		log.Printf("Checking admin rights for bot in group chat ID: %d", cfg.TelegramChatID)
-		adminEnabled, err := telegramBot.CheckAndRequestAdminRights(cfg.TelegramChatID)
-		if err != nil {
-			log.Printf("Error during CheckAndRequestAdminRights: %v", err)
+		adminEnabled, errAdminCheck := telegramBot.CheckAndRequestAdminRights(cfg.TelegramChatID)
+		if errAdminCheck != nil {
+			log.Printf("Error during CheckAndRequestAdminRights API call: %v", errAdminCheck)
 		} else if !adminEnabled {
+			// Check was successful, but rights are missing
 			messageText := "For correct operation, I need administrator rights in this group chat. Please provide them."
-			msg := tgbotapi.NewMessage(cfg.TelegramChatID, messageText)
-			if _, sendErr := telegramBot.api.Send(msg); sendErr != nil {
-				log.Printf("failed to send admin rights request message to chat %d: %w", cfg.TelegramChatID, sendErr)
+			if sendErr := telegramBot.SendMessage(messageText); sendErr != nil {
+				// tb.recipientId is cfg.TelegramChatID in this context
+				log.Printf("Failed to send admin rights request message to chat %d: %v", cfg.TelegramChatID, sendErr)
 			}
 		}
 
 		// Check if topics are enabled for the chat
-
-		topicsEnabled, err := telegramBot.CheckTopicsEnabled(cfg.TelegramChatID)
-		if err != nil {
-			log.Printf("Error checking topics for chat ID %d: %v", cfg.TelegramChatID, err)
+		topicsEnabled, errTopicsCheck := telegramBot.CheckTopicsEnabled(cfg.TelegramChatID)
+		if errTopicsCheck != nil {
+			log.Printf("Error checking topics for chat ID %d: %v", cfg.TelegramChatID, errTopicsCheck)
 		} else if !topicsEnabled {
+			// Check was successful, but topics are not enabled
 			notificationText := "Topics are not enabled in this group. Please enable them for proper functionality."
-			notificationMsg := tgbotapi.NewMessage(cfg.TelegramChatID, notificationText)
-			if _, sendErr := telegramBot.api.Send(notificationMsg); sendErr != nil {
+			if sendErr := telegramBot.SendMessage(notificationText); sendErr != nil {
+				// tb.recipientId is cfg.TelegramChatID in this context
 				log.Printf("Error sending 'topics not enabled' notification to chat ID %d: %v", cfg.TelegramChatID, sendErr)
 			} else {
 				log.Printf("Sent 'topics not enabled' notification to chat ID %d.", cfg.TelegramChatID)
@@ -104,7 +104,9 @@ func main() {
 			continue
 		}
 		if _, err := mail.ParseAddress(email); err != nil {
-			telegramBot.SendMessage("Email not valid!")
+			if errSend := telegramBot.SendMessage("Email not valid!"); errSend != nil {
+				log.Printf("Failed to send 'Email not valid' message: %v", errSend)
+			}
 			email = ""
 			continue
 		}
@@ -123,7 +125,9 @@ func main() {
 		c, err := imap.New(email, password, cfg.EmailImapHost, cfg.EmailImapPort)
 		if err != nil {
 			log.Printf("Failed to login to server: %v", err)
-			telegramBot.SendMessage("Wrong password!")
+			if errSend := telegramBot.SendMessage("Wrong password!"); errSend != nil {
+				log.Printf("Failed to send 'Wrong password' message: %v", errSend)
+			}
 			password = ""
 			continue
 		}
