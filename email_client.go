@@ -14,7 +14,22 @@ import (
 	"sync"
 
 	"github.com/BrianLeishman/go-imap"
+	"github.com/logrusorgru/aurora/v4"
 )
+
+// Reuse the global 'au' instance from main.go by declaring it here
+// This assumes 'au' is initialized in main.go before this package's functions are called.
+// For a larger application, a dedicated logging package or passing 'au' would be better.
+var au aurora.Aurora
+
+func init() {
+	// Initialize a local 'au' if not already (e.g. for tests or standalone use of this package)
+	// This is a simple way; main.go's `au` should ideally be the one used.
+	// A better approach might be to have a SetAurora(instance) function.
+	if au == nil {
+		au = aurora.New(aurora.WithColors(true))
+	}
+}
 
 type EmailClient struct {
 	imap *imap.Dialer
@@ -47,25 +62,27 @@ func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int
 	// Create IMAP client
 
 	serverAddr := fmt.Sprintf("%s:%d", imapHost, imapPort)
-	log.Printf("Try connecting to IMAP server: %s", serverAddr)
+	log.Println(au.Gray(11, "[IMAP]"), au.Yellow(fmt.Sprintf("Attempting to connect to IMAP server: %s", serverAddr)))
 
 	imap.RetryCount = 100
-	// imap.Verbose = true
+	// imap.Verbose = true // This would need to be adapted if used with aurora
 	c, err := imap.New(username, password, imapHost, imapPort)
 	if err != nil {
+		log.Println(au.Gray(11, "[IMAP]"), au.Red(aurora.Bold("Failed to login to IMAP server:")), au.Red(err))
 		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
 	}
+	log.Println(au.Gray(11, "[IMAP]"), au.Green(fmt.Sprintf("Successfully connected to IMAP server: %s", serverAddr)))
 
 	idleHandler := imap.IdleHandler{
 		OnExists: func(event imap.ExistsEvent) {
-			log.Println("[IDLE] New email arrived:", event.MessageIndex)
+			log.Println(au.Gray(11, "[IMAP_IDLE]"), au.Cyan("New email arrived."), au.Sprintf("MsgIndex: %d", event.MessageIndex))
 			callback()
 		},
 		OnExpunge: func(event imap.ExpungeEvent) {
-			log.Println("[IDLE] Email expunged:", event.MessageIndex)
+			log.Println(au.Gray(11, "[IMAP_IDLE]"), au.Magenta("Email expunged."), au.Sprintf("MsgIndex: %d", event.MessageIndex))
 		},
 		OnFetch: func(event imap.FetchEvent) {
-			log.Println("[IDLE] Email fetched:", event.MessageIndex, event.UID)
+			log.Println(au.Gray(11, "[IMAP_IDLE]"), au.BrightBlue("Email fetched."), au.Sprintf("MsgIndex: %d, UID: %d", event.MessageIndex, event.UID))
 		},
 	}
 
@@ -106,12 +123,12 @@ func (ec *EmailClient) Close() {
 	// IMAP Close
 
 	if ec.imap != nil {
-		log.Println("IMAP logging out...")
+		log.Println(au.Gray(11, "[IMAP]"), au.Yellow("IMAP logging out..."))
 		err := ec.imap.Close()
 		if err != nil {
-			log.Printf("Error during logout: %v", err)
+			log.Println(au.Gray(11, "[IMAP]"), au.Red("Error during IMAP logout:"), au.Red(err))
 		} else {
-			log.Println("Logged out successfully")
+			log.Println(au.Gray(11, "[IMAP]"), au.Green("IMAP logged out successfully"))
 		}
 	}
 
@@ -120,10 +137,10 @@ func (ec *EmailClient) Close() {
 // Listener
 
 func (ec *EmailClient) startIdleWithHandler() error {
-
-	log.Println("(Re)starting IDLE mode")
+	log.Println(au.Gray(11, "[IMAP_IDLE]"), au.Yellow("(Re)starting IDLE mode for INBOX..."))
 	folder := "INBOX"
 	if err := ec.selectFolder(folder); err != nil {
+		// selectFolder logs its own errors
 		return err
 	}
 
@@ -158,15 +175,15 @@ func (ec *EmailClient) FetchMail(uid int) (*imap.Email, error) {
 }
 
 func (ec *EmailClient) selectFolder(folder string) error {
-
 	if ec.imap.Folder != folder {
-		log.Println("Selecting " + folder + " for FetchMail...")
+		log.Println(au.Gray(11, "[IMAP]"), au.Yellow(fmt.Sprintf("Selecting folder '%s'...", folder)))
 		err := ec.imap.SelectFolder(folder)
 		if err != nil {
-			return fmt.Errorf("failed to select "+folder+" for fetch: %w", err)
+			log.Println(au.Gray(11, "[IMAP]"), au.Red(fmt.Sprintf("Failed to select folder '%s':", folder)), au.Red(err))
+			return fmt.Errorf("failed to select folder %s: %w", folder, err)
 		}
+		log.Println(au.Gray(11, "[IMAP]"), au.Green(fmt.Sprintf("Successfully selected folder '%s'.", folder)))
 	}
-
 	return nil
 }
 
@@ -186,16 +203,19 @@ func (ec *EmailClient) ListNewMailUIDs() ([]int, error) {
 	if err := ec.selectFolder(folder); err != nil {
 		return nil, err
 	}
-	newUIDs, err := ec.imap.GetUIDs("UID " + strconv.Itoa(ec.lastProcessedUID) + ":* UNDELETED")
+	searchCriteria := fmt.Sprintf("UID %d:* UNDELETED", ec.lastProcessedUID)
+	log.Println(au.Gray(11, "[IMAP_UID]"), au.Yellow(fmt.Sprintf("Searching for UIDs with criteria: \"%s\"", searchCriteria)))
+	newUIDs, err := ec.imap.GetUIDs(searchCriteria)
 	if err != nil {
+		log.Println(au.Gray(11, "[IMAP_UID]"), au.Red("UID search failed:"), au.Red(err))
 		return nil, fmt.Errorf("UID search failed: %w", err)
 	}
-	log.Printf("Found total %d UIDs in %s", len(newUIDs), folder)
+	log.Println(au.Gray(11, "[IMAP_UID]"), au.Green(fmt.Sprintf("Found %d total UIDs in %s matching criteria.", len(newUIDs), folder)))
 
 	// Unprocessed UIDs
-
 	ec.dataMu.Lock()
 	defer ec.dataMu.Unlock()
+
 	var unprocessed []int
 	for _, uid := range newUIDs {
 		if uid > ec.lastProcessedUID {
@@ -203,8 +223,11 @@ func (ec *EmailClient) ListNewMailUIDs() ([]int, error) {
 		}
 	}
 	sort.Slice(unprocessed, func(i, j int) bool { return unprocessed[i] < unprocessed[j] })
-	log.Printf("Found %d new unprocessed UIDs", len(unprocessed))
-
+	if len(unprocessed) > 0 {
+		log.Println(au.Gray(11, "[IMAP_UID]"), au.Green(fmt.Sprintf("Found %d new unprocessed UIDs (older: %d).", len(unprocessed), ec.lastProcessedUID)))
+	} else {
+		log.Println(au.Gray(11, "[IMAP_UID]"), au.Cyan(fmt.Sprintf("No new unprocessed UIDs found (older: %d).", ec.lastProcessedUID)))
+	}
 	return unprocessed, nil
 }
 
@@ -236,7 +259,7 @@ func (ec *EmailClient) AddAllUIDsIfFirstStart(uids []int) ([]int, error) {
 		ec.dataMu.Lock()
 		ec.lastProcessedUID = maxUID
 		ec.dataMu.Unlock()
-		log.Printf("Saved initial last UID %d to %s", maxUID, processedUIDFile)
+		log.Println(au.Gray(11, "[IMAP_UID]"), au.Cyan(fmt.Sprintf("First start: Saved initial last UID %d to %s", maxUID, processedUIDFile)))
 
 		return nil, nil
 	}
@@ -312,9 +335,10 @@ func (ec *EmailClient) ReplyTo(uid int, message string, files []struct{ Url, Nam
 	body := fmt.Sprintf("<p>%s</p>%s", html.EscapeString(message), attachments)
 
 	addresses := mail.From
+	originalFrom := mail.From // For logging
 	if len(mail.ReplyTo) > 0 {
 		addresses = mail.ReplyTo
-		log.Printf("Using Reply-To address %v instead of From %v", mail.ReplyTo, mail.From)
+		log.Println(au.Gray(11, "[EMAIL_REPLY]"), au.Cyan("Using Reply-To address(es):"), mail.ReplyTo, au.BrightBlack("instead of From:"), originalFrom)
 	}
 	var to []string
 	for address := range addresses {
@@ -332,15 +356,16 @@ func (ec *EmailClient) ReplyTo(uid int, message string, files []struct{ Url, Nam
 		[]byte(msg),
 	)
 	if err != nil {
+		log.Println(au.Gray(11, "[SMTP]"), au.Red(aurora.Bold("SMTP error during reply:")) яйцо au.Red(err))
 		return fmt.Errorf("smtp error: %s", err)
 	}
 
-	log.Printf("Successfully sent reply to email %d", uid)
+	log.Println(au.Gray(11, "[EMAIL_REPLY]"), au.Green(fmt.Sprintf("Successfully sent reply to email UID %d (To: %s)", uid, strings.Join(to, ", "))))
 	return nil
 }
 
 func (ec *EmailClient) SendMail(to []string, title string, message string, files []struct{ Url, Name string }) error {
-
+	log.Println(au.Gray(11, "[EMAIL_SEND]"), au.Yellow(fmt.Sprintf("Preparing to send new email. To: %s, Title: %s", strings.Join(to, ", "), title)))
 	var attachments string
 	if len(files) > 0 {
 		attachments += "<ul>"
@@ -348,12 +373,13 @@ func (ec *EmailClient) SendMail(to []string, title string, message string, files
 			attachments += fmt.Sprintf(`<li><a href="%s">%s</a></li>`, f.Url, html.EscapeString(f.Name))
 		}
 		attachments += "</ul>"
+		log.Println(au.Gray(11, "[EMAIL_SEND]"), au.Cyan(fmt.Sprintf("Added %d attachments to the email.", len(files))))
 	}
 	body := fmt.Sprintf("<p>%s</p>%s", html.EscapeString(message), attachments)
 	msg := getHTMLMsg(ec.username, to, title, body)
 
 	// Send
-
+	log.Println(au.Gray(11, "[SMTP]"), au.Yellow(fmt.Sprintf("Sending email via SMTP to %s...", strings.Join(to, ", "))))
 	err := smtp.SendMail(
 		fmt.Sprintf("%s:%d", ec.smtpHost, ec.smtpPort),
 		smtp.PlainAuth("", ec.username, ec.password, ec.smtpHost),
@@ -362,9 +388,10 @@ func (ec *EmailClient) SendMail(to []string, title string, message string, files
 		[]byte(msg),
 	)
 	if err != nil {
+		log.Println(au.Gray(11, "[SMTP]"), au.Red(aurora.Bold("SMTP error during send mail:")), au.Red(err))
 		return fmt.Errorf("smtp error: %s", err)
 	}
-	log.Printf("Successfully sent email to %s", strings.Join(to, ", "))
+	log.Println(au.Gray(11, "[EMAIL_SEND]"), au.Green(fmt.Sprintf("Successfully sent email to %s", strings.Join(to, ", "))))
 
 	return nil
 }
