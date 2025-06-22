@@ -37,17 +37,17 @@ type FileAttachment struct {
 	Data []byte
 }
 
-func (t *TelegramBot) getFileURL(fileID string) (string, error) {
+func (tb *TelegramBot) getFileURL(fileID string) (string, error) {
 
 	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Getting file URL for ID: %s").String(), fileID)
-	if t.api == nil {
+	if tb.api == nil {
 		return "", errors.New("telego API not initialized in getFileURL")
 	}
-	if t.ctx == nil {
-		t.ctx = context.Background()
+	if tb.ctx == nil {
+		tb.ctx = context.Background()
 	}
 
-	file, err := t.api.GetFile(t.ctx, &telego.GetFileParams{FileID: fileID})
+	file, err := tb.api.GetFile(tb.ctx, &telego.GetFileParams{FileID: fileID})
 	if err != nil {
 		return "", fmt.Errorf("telego failed to get file: %w", err)
 	}
@@ -55,14 +55,14 @@ func (t *TelegramBot) getFileURL(fileID string) (string, error) {
 		return "", fmt.Errorf("telego GetFile returned empty file_path for FileID: %s", fileID)
 	}
 
-	url := t.api.FileDownloadURL(file.FilePath)
+	url := tb.api.FileDownloadURL(file.FilePath)
 	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Green("Got file URL: %s").String(), url)
 
 	return url, nil
 
 }
 
-func (t *TelegramBot) getAllFileURLs(msg *telego.Message) []struct{ Url, Name string } {
+func (tb *TelegramBot) getAllFileURLs(msg *telego.Message) []struct{ Url, Name string } {
 
 	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Cyan("Processing attachments...").String())
 	files := []struct{ Url, Name string }{}
@@ -70,7 +70,7 @@ func (t *TelegramBot) getAllFileURLs(msg *telego.Message) []struct{ Url, Name st
 	var err error
 
 	processAttachment := func(fileType, fileID, fileName string) {
-		url, err = t.getFileURL(fileID)
+		url, err = tb.getFileURL(fileID)
 		if err != nil {
 			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Red("Error getting %s file URL %s: %v").String(),
 				fileType, fileID, err)
@@ -166,7 +166,7 @@ func parseMailContent(msgText string) (to, title, body string, ok bool) {
 
 }
 
-func (t *TelegramBot) bufferAlbumMessage(msg *telego.Message, callback func([]*telego.Message)) bool {
+func (tb *TelegramBot) bufferAlbumMessage(msg *telego.Message, callback func([]*telego.Message)) bool {
 
 	if msg.MediaGroupID == "" {
 		return false

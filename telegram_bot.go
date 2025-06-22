@@ -22,6 +22,7 @@ type TelegramBot struct {
 	updates     <-chan telego.Update
 	isChat      bool
 	topics      map[string]string
+	uids        map[string]string
 	ctx         context.Context
 }
 
@@ -56,15 +57,15 @@ func NewTelegramBot(apiToken string, recipientID int64) (*TelegramBot, error) {
 
 }
 
-func (t *TelegramBot) StartListener(replayMessage func(uid int, message string, files []struct{ Url, Name string }), newMessage func(to string, title string, message string, files []struct{ Url, Name string })) {
+func (tb *TelegramBot) StartListener(replayMessage func(uid int, message string, files []struct{ Url, Name string }), newMessage func(to string, title string, message string, files []struct{ Url, Name string })) {
 
 	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Cyan("Starting message listener...").String())
-	if t.ctx == nil {
-		t.ctx = context.Background()
+	if tb.ctx == nil {
+		tb.ctx = context.Background()
 	}
 	go func() {
-		for update := range t.updates {
-			t.handleUpdate(update, replayMessage, newMessage)
+		for update := range tb.updates {
+			tb.handleUpdate(update, replayMessage, newMessage)
 		}
 	}()
 
@@ -144,8 +145,7 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 
 func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool) error {
 
-	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Sending email data (UID: %d, IsCode: %t, IsSpam: %t)").String(),
-		data.Uid, isCode, isSpam)
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Sending email data (UID: %d, IsCode: %t, IsSpam: %t)").String(), data.Uid, isCode, isSpam)
 	if tb.api == nil {
 		return errors.New("telego API is not initialized in SendEmailData")
 	}
@@ -170,6 +170,14 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool)
 			}
 		}
 
+		if tb.uids == nil {
+			tb.uids, err = LoadAndDecrypt(rid, rid+".uis")
+			if err != nil {
+				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to load uids: %v").String(), err)
+				tb.uids = make(map[string]string)
+			}
+		}
+
 		// Check topic id from topics, then create topic if needed
 
 		subj := cleanSubject(data.Subject)
@@ -181,8 +189,12 @@ func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool)
 				return fmt.Errorf("topic handling error (ensureTopic failed): %w", err)
 			}
 			tb.topics[subj] = tid
-			if errSave := EncryptAndSave(rid, rid+".top", tb.topics); errSave != nil {
-				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to save topics: %v").String(), errSave)
+			if err := EncryptAndSave(rid, rid+".top", tb.topics); err != nil {
+				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to save topics: %v").String(), err)
+			}
+			tb.uids[tid] = fmt.Sprint(data.Uid)
+			if err := EncryptAndSave(rid, rid+".uis", tb.uids); err != nil {
+				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to save uids: %v").String(), err)
 			}
 		}
 	}
@@ -283,10 +295,10 @@ func (tb *TelegramBot) CheckTopicsEnabled(chatID int64) (bool, error) {
 
 // Events from user
 
-func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(uid int, message string, files []struct{ Url, Name string }), newMessageFunc func(to string, title string, message string, files []struct{ Url, Name string })) {
+func (tb *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(uid int, message string, files []struct{ Url, Name string }), newMessageFunc func(to string, title string, message string, files []struct{ Url, Name string })) {
 
-	if t.ctx == nil {
-		t.ctx = context.Background()
+	if tb.ctx == nil {
+		tb.ctx = context.Background()
 	}
 	if update.Message == nil {
 		return
@@ -297,58 +309,94 @@ func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(
 		fid = msg.From.ID
 	}
 	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Processing update from chat %d, user %d").String(), msg.Chat.ID, fid)
-	if msg.Chat.ID != t.recipientId {
-		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Ignoring message from unexpected chat (expected %d)").String(), t.recipientId)
+
+	// Check if message is from a topic that's not the main one
+
+	if msg.Chat.ID != tb.recipientId {
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Ignoring message from unexpected chat (expected %d)").String(), tb.recipientId)
 		return
 	}
 
-	// Reply message
+	// Handle reply messages or topic message
 
 	if msg.ReplyToMessage != nil {
-		repliedText := msg.ReplyToMessage.Text
+		tb.handleReplyMessage(msg, replayMessageFunc)
+		return
+	}
 
+	// Handle new messages
+
+	tb.handleNewMessage(msg, newMessageFunc)
+}
+
+func (tb *TelegramBot) handleReplyMessage(msg *telego.Message, replayMessageFunc func(uid int, message string, files []struct{ Url, Name string })) {
+
+	// Get uid marked message
+
+	var uidCode int
+	if msg.MessageThreadID > 0 {
+
+		// Get uid from topic
+
+		uidCode, _ = strconv.Atoi(tb.uids[fmt.Sprint(msg.MessageThreadID)])
+
+	} else {
+
+		// Get uid from message
+
+		repliedText := msg.ReplyToMessage.Text
 		if repliedText == "" && msg.ReplyToMessage.Caption != "" {
 			repliedText = msg.ReplyToMessage.Caption
 		}
-
-		if uidCode := telehtml.FindInvisibleIntSequences(repliedText); len(uidCode) > 0 {
-			uidToReply := telehtml.DecodeIntInvisible(uidCode[0])
-			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Processing reply to message UID %d").String(), uidToReply)
-
-			// Group files (album)
-
-			if msg.MediaGroupID != "" {
-				if t.bufferAlbumMessage(msg, func(albumMsgs []*telego.Message) {
-					files := []struct{ Url, Name string }{}
-					for _, m := range albumMsgs {
-						files = append(files, t.getAllFileURLs(m)...)
-					}
-					text := extractTextFromMessages(albumMsgs)
-					log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Processing album reply with %d files").String(), len(files))
-					replayMessageFunc(uidToReply, text, files)
-				}) {
-					return
-				}
-			}
-
-			// Single file / non-album message
-
-			files := t.getAllFileURLs(msg)
-			body := msg.Text
-			if body == "" {
-				body = msg.Caption
-			}
-			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Processing single reply with %d files").String(), len(files))
-			replayMessageFunc(uidToReply, body, files)
-			return
+		res := telehtml.FindInvisibleIntSequences(repliedText)
+		if len(res) > 0 {
+			uidCode = telehtml.DecodeIntInvisible(res[0])
 		}
 	}
 
-	// New Message or unhandled Reply
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Processing reply to message UID %d").String(), uidCode)
+
+	// Group files (album)
+
+	if msg.MediaGroupID != "" {
+		if tb.bufferAlbumMessage(msg, func(albumMsgs []*telego.Message) {
+			files := []struct{ Url, Name string }{}
+			for _, m := range albumMsgs {
+				files = append(files, tb.getAllFileURLs(m)...)
+			}
+			text := extractTextFromMessages(albumMsgs)
+			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Processing album reply with %d files").String(), len(files))
+			replayMessageFunc(uidCode, text, files)
+		}) {
+			return
+		}
+		return
+	}
+
+	// Single file / non-album message
+
+	files := tb.getAllFileURLs(msg)
+	body := msg.Text
+	if body == "" {
+		body = msg.Caption
+	}
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Processing single reply with %d files").String(), len(files))
+	replayMessageFunc(uidCode, body, files)
+
+}
+
+func (tb *TelegramBot) handleNewMessage(msg *telego.Message, newMessageFunc func(to string, title string, message string, files []struct{ Url, Name string })) {
+
+	// Triggered bot off
+
+	if msg.From.IsBot {
+		return
+	}
+
 	// Group files (album) for new message
 
 	if msg.MediaGroupID != "" {
-		if t.bufferAlbumMessage(msg, func(albumMsgs []*telego.Message) {
+		if tb.bufferAlbumMessage(msg, func(albumMsgs []*telego.Message) {
 			var rawText string
 			for _, m := range albumMsgs {
 				if m.Text != "" {
@@ -363,11 +411,12 @@ func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(
 			to, title, body, ok := parseMailContent(rawText)
 			if !ok {
 				log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Yellow("Invalid mail format in album").String())
+				tb.sendInstructions()
 				return
 			}
 			files := []struct{ Url, Name string }{}
 			for _, m := range albumMsgs {
-				files = append(files, t.getAllFileURLs(m)...)
+				files = append(files, tb.getAllFileURLs(m)...)
 			}
 			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Processing new album message with %d files").String(), len(files))
 			newMessageFunc(to, title, body, files)
@@ -386,15 +435,13 @@ func (t *TelegramBot) handleUpdate(update telego.Update, replayMessageFunc func(
 	to, title, body, ok := parseMailContent(msgText)
 	if !ok {
 		log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Yellow("Invalid mail format, sending instructions").String())
-		t.SendMessage("Hi! I'm your mail bot.")
-		t.SendMessage("To reply to an email, just reply to the message and \n\nenter your text, and attach files if needed.")
-		t.SendMessage("To send a new email, use the format:\n\nto.user@mail.example.com\nSubject line\nEmail text\n\nAttach files if needed.")
+		tb.sendInstructions()
 		return
 	}
-	files := t.getAllFileURLs(msg)
+
+	files := tb.getAllFileURLs(msg)
 	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Processing new message with %d files").String(), len(files))
 	newMessageFunc(to, title, body, files)
-
 }
 
 // Helpers
@@ -534,4 +581,10 @@ func (tb *TelegramBot) sendAttachments(tid string, data *ParsedEmailData) error 
 
 	return nil
 
+}
+
+func (tb *TelegramBot) sendInstructions() {
+	tb.SendMessage("Hi! I'm your mail bot.")
+	tb.SendMessage("To reply to an email, just reply to the message and enter your text, and attach files if needed.")
+	tb.SendMessage("To send a new email, use the format:\n\nto.user@mail.example.com\nSubject line\nEmail text\n\nAttach files if needed.")
 }
