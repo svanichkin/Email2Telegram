@@ -233,11 +233,14 @@ func processNewEmails(ec *EmailClient, tb *TelegramBot, ai *OpenAIClient) {
 		isSpam := false
 		if ai != nil && d != nil && d.TextBody != "" {
 			log.Printf(au.Gray(12, "[OPENAI]").String()+" "+au.Magenta("Attempting to process email UID %d with OpenAI...").String(), uid)
-			res, err := ai.GenerateTextFromEmail(d.Subject + " " + d.From + " " + d.TextBody)
+			res, err := ai.GenerateTextFromEmail("Subject: " + d.Subject + " From: " + d.From + " To: " + d.To + " Body: " + d.TextBody)
 			if err != nil {
 				log.Printf(au.Gray(12, "[OPENAI]").String()+" "+au.Red("Failed to process email UID %d with OpenAI: %v. Sending original email.").String(), uid, err)
 			}
 			isSpam = res.IsSpam
+			if isSpam {
+				d.TextBody = res.Summary
+			}
 		}
 
 		if err := tb.SendEmailData(d, isCode, isSpam); err != nil {

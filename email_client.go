@@ -51,7 +51,7 @@ func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int
 	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Cyan("Connecting to IMAP server: %s").String(), serverAddr)
 
 	imap.RetryCount = 100
-	// imap.Verbose = true
+	imap.Verbose = true
 	c, err := imap.New(username, password, imapHost, imapPort)
 	if err != nil {
 		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
