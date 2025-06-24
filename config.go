@@ -166,7 +166,6 @@ func readCred(uid int64) (string, string) {
 		if err != nil {
 			log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Red("Failed to get credentials from file: %v").String(), err)
 		}
-		fmt.Println(decrypted)
 		return decrypted["email"], decrypted["password"]
 	}
 
@@ -176,7 +175,6 @@ func readCred(uid int64) (string, string) {
 
 func (cfg *Config) updateHostIfNeeded(email string) {
 
-	log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Blue("Current IMAP host: %s").String(), cfg.EmailImapHost)
 	if host, err := getHost(email); err == nil {
 		log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Blue("Extracted host from email: %s").String(), host)
 		if len(cfg.EmailImapHost) == 0 {
