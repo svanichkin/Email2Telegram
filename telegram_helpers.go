@@ -128,7 +128,7 @@ func (tb *TelegramBot) sendCode(tid int, d *ParsedEmailData) error {
 			u, e = d.Unsubscrube, uid
 		}
 		if err := tb.sendMessage(tid, msg, u, e); err != nil {
-			return fmt.Errorf("failed to send code message to topic %s with Telego: %w", tid, err)
+			return fmt.Errorf("failed to send code message to topic %d with Telego: %w", tid, err)
 		}
 	}
 
@@ -223,7 +223,7 @@ func (tb *TelegramBot) sendAttachments(tid int, d *ParsedEmailData) error {
 			if _, err := tb.api.SendDocument(tb.ctx, p); err != nil {
 				target := "direct message"
 				if tb.isChat {
-					target = fmt.Sprintf("topic %s", tid)
+					target = fmt.Sprintf("topic %d", tid)
 				}
 				return fmt.Errorf("failed to send attachment %s to %s (email UID %d) with Telego: %w", fn, target, d.Uid, err)
 			}
