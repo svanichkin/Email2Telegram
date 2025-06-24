@@ -153,9 +153,7 @@ To enable these features, you need to provide an OpenAI API token:
     *   To include attachments, send the text message above first. Then, send the files (photos, documents, etc.) as separate messages immediately after. The application groups media sent in quick succession.
 
 **(Optional Screenshot Placeholder)**
-<!-- If you have a screenshot URL, it can be embedded here, e.g.,
-![Email2Telegram new features](URL_OF_SCREENSHOT)
--->
+![Email2Telegram sample](./email2telegram.png)
 
 ## Contributing
 
