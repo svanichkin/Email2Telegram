@@ -51,7 +51,7 @@ func NewEmailClient(imapHost string, imapPort int, smtpHost string, smtpPort int
 	log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Cyan("Connecting to IMAP server: %s").String(), serverAddr)
 
 	imap.RetryCount = 100
-	imap.Verbose = true
+	// imap.Verbose = true
 	c, err := imap.New(username, password, imapHost, imapPort)
 	if err != nil {
 		return nil, fmt.Errorf("failed to login to IMAP server: %w", err)
@@ -273,12 +273,12 @@ func loadLastProcessedUID(filePath string) (int, error) {
 		if val == "" {
 			return 0, nil
 		}
-		uid, err := strconv.ParseInt(val, 10, 32)
+		uid, err := strconv.Atoi(val)
 		if err != nil {
 			return 0, fmt.Errorf("invalid last UID: %w", err)
 		}
 		log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Blue("Loaded last processed UID: %d").String(), uid)
-		return int(uid), nil
+		return uid, nil
 	}
 
 	return 0, nil
@@ -304,7 +304,7 @@ func (ec *EmailClient) ReplyTo(uid int, message string, files []struct{ Url, Nam
 
 	// Get original mail
 
-	mail, err := ec.FetchMail(uid)
+	m, err := ec.FetchMail(uid)
 	if err != nil {
 		return fmt.Errorf("error fetching email %d: %w", uid, err)
 	}
@@ -321,16 +321,16 @@ func (ec *EmailClient) ReplyTo(uid int, message string, files []struct{ Url, Nam
 	}
 	body := fmt.Sprintf("<p>%s</p>%s", html.EscapeString(message), attachments)
 
-	addresses := mail.From
-	if len(mail.ReplyTo) > 0 {
-		addresses = mail.ReplyTo
-		log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Blue("Using Reply-To address %v instead of From %v").String(), mail.ReplyTo, mail.From)
+	addresses := m.From
+	if len(m.ReplyTo) > 0 {
+		addresses = m.ReplyTo
+		log.Printf(au.Gray(12, "[EMAIL]").String()+" "+au.Blue("Using Reply-To address %v instead of From %v").String(), m.ReplyTo, m.From)
 	}
 	var to []string
 	for address := range addresses {
 		to = append(to, address)
 	}
-	msg := getHTMLMsg(ec.username, to, mail.Subject, body)
+	msg := getHTMLMsg(ec.username, to, m.Subject, body)
 
 	// Send
 

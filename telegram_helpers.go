@@ -42,74 +42,61 @@ func (tb *TelegramBot) ensureTopic(subject string) (string, error) {
 
 }
 
-func (tb *TelegramBot) createTopicAndGetId(data *ParsedEmailData) (tid string, err error) {
+func (tb *TelegramBot) createTopicAndGetId(data *ParsedEmailData) (tid int, err error) {
 
 	rid := fmt.Sprint(tb.recipientId)
-
-	// If topics is nil, try loading or create empty
-
-	if tb.topics == nil {
-		tb.topics, err = LoadAndDecrypt(rid, rid+".top")
-		if err != nil {
-			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to load topics: %v").String(), err)
-			tb.topics = make(map[string]string)
-		}
-	}
-
-	if tb.uids == nil {
-		tb.uids, err = LoadAndDecrypt(rid, rid+".uis")
-		if err != nil {
-			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to load uids: %v").String(), err)
-			tb.uids = make(map[string]string)
-		}
-	}
 
 	// Check topic id from topics, then create topic if needed
 
 	subj := cleanSubject(data.Subject)
-	tid = tb.topics[subj]
-	if tid == "" {
+	t := tb.tids[subj]
+	if t == "" {
 		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Creating new topic for: %s").String(), subj)
-		tid, err = tb.ensureTopic(subj)
+		t, err = tb.ensureTopic(subj)
 		if err != nil {
-			return "", fmt.Errorf("topic handling error (ensureTopic failed): %w", err)
+			return 0, fmt.Errorf("topic handling error (ensureTopic failed): %w", err)
 		}
-		tb.topics[subj] = tid
-		if err := EncryptAndSave(rid, rid+".top", tb.topics); err != nil {
+		tb.tids[subj] = t
+		if err := EncryptAndSave(rid, rid+".top", tb.tids); err != nil {
 			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to save topics: %v").String(), err)
 		}
-		tb.uids[tid] = fmt.Sprint(data.Uid)
+		tb.uids[t] = fmt.Sprint(data.Uid)
 		if err := EncryptAndSave(rid, rid+".uis", tb.uids); err != nil {
 			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to save uids: %v").String(), err)
 		}
 	}
-
-	return tid, err
+	tid, err = strconv.Atoi(t)
+	if err != nil {
+		log.Println("Ошибка конвертации:", err)
+	}
+	return
 
 }
 
-func (tb *TelegramBot) sendMessage(tid, text, unsubscribeURL string) error {
+func (tb *TelegramBot) sendMessage(tid int, text, unsubscribe, uid string) error {
 
 	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Magenta("Sending message to topic %s").String(), tid)
 	p := tu.Message(tu.ID(tb.recipientId), text)
 	p.ParseMode = telego.ModeHTML
-	if len(tid) > 0 {
-		tidInt64, err := strconv.ParseInt(tid, 10, 64)
-		if err != nil {
-			return err
-		}
-		p.MessageThreadID = int(tidInt64)
-	}
+	p.MessageThreadID = tid
 	p.LinkPreviewOptions = &telego.LinkPreviewOptions{IsDisabled: true}
-	if unsubscribeURL != "" {
+	var buttons []telego.InlineKeyboardButton
+	if unsubscribe != "" {
+		buttons = append(buttons, telego.InlineKeyboardButton{
+			Text: "🚫 UNSUBSCRIBE",
+			URL:  unsubscribe,
+		})
+	}
+	if uid != "" {
+		buttons = append(buttons, telego.InlineKeyboardButton{
+			Text:         "🧾 EXPAND",
+			CallbackData: "expand:" + uid,
+		})
+	}
+	if len(buttons) > 0 {
 		p.ReplyMarkup = &telego.InlineKeyboardMarkup{
 			InlineKeyboard: [][]telego.InlineKeyboardButton{
-				{
-					telego.InlineKeyboardButton{
-						Text: "🚫 UNSUBSCRIBE",
-						URL:  unsubscribeURL,
-					},
-				},
+				buttons,
 			},
 		}
 	}
@@ -120,26 +107,27 @@ func (tb *TelegramBot) sendMessage(tid, text, unsubscribeURL string) error {
 	return nil
 }
 
-func (tb *TelegramBot) sendCode(tid string, d *ParsedEmailData) error {
+func (tb *TelegramBot) sendCode(tid int, d *ParsedEmailData) error {
 
 	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Blue("Sending code message").String())
 	if !tb.isChat {
-		if err := tb.sendMessage("", "🔑 <b>"+d.Subject+"\n\n"+d.From+"\n⤷ "+d.To+"</b>"+telehtml.EncodeIntInvisible(d.Uid), ""); err != nil {
+		if err := tb.sendMessage(0, "🔑 <b>"+d.Subject+"\n\n"+d.From+"\n⤷ "+d.To+"</b>"+telehtml.EncodeIntInvisible(d.Uid), "", ""); err != nil {
 			return fmt.Errorf("failed to send title message (code) with Telego: %w", err)
 		}
 	} else {
-		if err := tb.sendMessage("", "<b>"+d.From+"\n⤷ "+d.To+"</b>"+telehtml.EncodeIntInvisible(d.Uid), ""); err != nil {
+		if err := tb.sendMessage(0, "<b>"+d.From+"\n⤷ "+d.To+"</b>"+telehtml.EncodeIntInvisible(d.Uid), "", ""); err != nil {
 			return fmt.Errorf("failed to send title message (code) with Telego: %w", err)
 		}
 	}
-	message := d.Summary
-	if message == "" {
-		message = d.TextBody
-	}
-	messages := telehtml.SplitTelegramHTML(message)
+	m, uid := messageAndUid(d)
+	messages := telehtml.SplitTelegramHTML(m)
 	for i, msg := range messages {
 		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending code message part %d/%d").String(), i+1, len(messages))
-		if err := tb.sendMessage(tid, msg, d.Unsubscrube); err != nil {
+		u, e := "", ""
+		if i == len(messages)-1 {
+			u, e = d.Unsubscrube, uid
+		}
+		if err := tb.sendMessage(tid, msg, u, e); err != nil {
 			return fmt.Errorf("failed to send code message to topic %s with Telego: %w", tid, err)
 		}
 	}
@@ -151,14 +139,15 @@ func (tb *TelegramBot) sendCode(tid string, d *ParsedEmailData) error {
 func (tb *TelegramBot) sendSpamOrPhishing(d *ParsedEmailData) error {
 
 	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Blue("Sending spam message").String())
-	message := d.Summary
-	if message == "" {
-		message = d.TextBody
-	}
-	messages := telehtml.SplitTelegramHTML("🚫 <b>" + d.Subject + "\n\n" + d.From + "\n⤷ " + d.To + "</b>\n\n" + message)
+	m, uid := messageAndUid(d)
+	messages := telehtml.SplitTelegramHTML("🚫 <b>" + d.Subject + "\n\n" + d.From + "\n⤷ " + d.To + "</b>\n\n" + m)
 	for i, msg := range messages {
 		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending spam or phising message part %d/%d").String(), i+1, len(messages))
-		if err := tb.sendMessage("", msg+telehtml.EncodeIntInvisible(d.Uid), d.Unsubscrube); err != nil {
+		u, e := "", ""
+		if i == len(messages)-1 {
+			u, e = d.Unsubscrube, uid
+		}
+		if err := tb.sendMessage(0, msg+telehtml.EncodeIntInvisible(d.Uid), u, e); err != nil {
 			return fmt.Errorf("failed to send code message with Telego: %w", err)
 		}
 	}
@@ -167,22 +156,22 @@ func (tb *TelegramBot) sendSpamOrPhishing(d *ParsedEmailData) error {
 
 }
 
-func (tb *TelegramBot) sendHumanOrNotificationOrUnknown(tid string, d *ParsedEmailData) error {
+func (tb *TelegramBot) sendHumanOrNotificationOrUnknown(tid int, d *ParsedEmailData) error {
 
-	message := d.Summary
-	if message == "" {
-		message = d.TextBody
-	}
+	m, uid := messageAndUid(d)
 	var messages []string
 	if !tb.isChat {
-		messages = telehtml.SplitTelegramHTML("✉️ <b>" + d.Subject + "\n\n" + d.From + "\n⤷ " + d.To + "</b>\n\n" + message)
-		tid = ""
+		messages = telehtml.SplitTelegramHTML("✉️ <b>" + d.Subject + "\n\n" + d.From + "\n⤷ " + d.To + "</b>\n\n" + m)
 	} else {
-		messages = telehtml.SplitTelegramHTML("<b>" + d.From + "\n⤷ " + d.To + "</b>\n\n" + message)
+		messages = telehtml.SplitTelegramHTML("<b>" + d.From + "\n⤷ " + d.To + "</b>\n\n" + m)
 	}
 	for i, msg := range messages {
 		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending message part %d/%d").String(), i+1, len(messages))
-		if err := tb.sendMessage(tid, msg+telehtml.EncodeIntInvisible(d.Uid), d.Unsubscrube); err != nil {
+		u, e := "", ""
+		if i == len(messages)-1 {
+			u, e = d.Unsubscrube, uid
+		}
+		if err := tb.sendMessage(tid, msg+telehtml.EncodeIntInvisible(d.Uid), u, e); err != nil {
 			return fmt.Errorf("failed to send main part with Telego: %w", err)
 		}
 	}
@@ -191,7 +180,30 @@ func (tb *TelegramBot) sendHumanOrNotificationOrUnknown(tid string, d *ParsedEma
 
 }
 
-func (tb *TelegramBot) sendAttachments(tid string, d *ParsedEmailData) error {
+func (tb *TelegramBot) sendExpand(tid int, d *ParsedEmailData) error {
+
+	var messages []string
+	if tid > 0 {
+		messages = telehtml.SplitTelegramHTML("<b>" + d.From + "\n⤷ " + d.To + "</b>\n\n" + d.TextBody)
+	} else {
+		messages = telehtml.SplitTelegramHTML("🧾 <b>" + d.Subject + "\n\n" + d.From + "\n⤷ " + d.To + "</b>\n\n" + d.TextBody)
+	}
+	for i, msg := range messages {
+		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending message part %d/%d").String(), i+1, len(messages))
+		u := ""
+		if i == len(messages)-1 {
+			u = d.Unsubscrube
+		}
+		if err := tb.sendMessage(tid, msg+telehtml.EncodeIntInvisible(d.Uid), u, ""); err != nil {
+			return fmt.Errorf("failed to send main part with Telego: %w", err)
+		}
+	}
+
+	return nil
+
+}
+
+func (tb *TelegramBot) sendAttachments(tid int, d *ParsedEmailData) error {
 
 	if len(d.Attachments) > 0 {
 		log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Sending %d attachments").String(), len(d.Attachments))
@@ -205,11 +217,7 @@ func (tb *TelegramBot) sendAttachments(tid string, d *ParsedEmailData) error {
 			if !tb.isChat {
 				p = tu.Document(tu.ID(tb.recipientId), f)
 			} else {
-				tidInt64, err := strconv.ParseInt(tid, 10, 64)
-				if err != nil {
-					return err
-				}
-				p = tu.Document(tu.ID(tb.recipientId), f).WithMessageThreadID(int(tidInt64))
+				p = tu.Document(tu.ID(tb.recipientId), f).WithMessageThreadID(tid)
 			}
 			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Sending attachment: %s (%d bytes)").String(), fn, len(b))
 			if _, err := tb.api.SendDocument(tb.ctx, p); err != nil {
@@ -232,4 +240,13 @@ func (tb *TelegramBot) sendInstructions() {
 	tb.SendMessage("To reply to an email, just reply to the message and enter your text, and attach files if needed.")
 	tb.SendMessage("To send a new email, use the format:\n\nto.user@mail.example.com\nSubject line\nEmail text\n\nAttach files if needed.")
 
+}
+
+func messageAndUid(d *ParsedEmailData) (string, string) {
+
+	if d.Summary != "" {
+		return d.Summary, fmt.Sprint(d.Uid)
+	}
+
+	return d.TextBody, ""
 }
