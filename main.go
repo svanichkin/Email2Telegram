@@ -229,21 +229,18 @@ func processNewEmails(ec *EmailClient, tb *TelegramBot, ai *OpenAIClient) {
 		}
 		d := ParseEmail(m, uid)
 
-		isCode := false
-		isSpam := false
 		if ai != nil && d != nil && d.TextBody != "" {
 			log.Printf(au.Gray(12, "[OPENAI]").String()+" "+au.Magenta("Attempting to process email UID %d with OpenAI...").String(), uid)
 			res, err := ai.GenerateTextFromEmail("Subject: " + d.Subject + " From: " + d.From + " To: " + d.To + " Body: " + d.TextBody)
 			if err != nil {
 				log.Printf(au.Gray(12, "[OPENAI]").String()+" "+au.Red("Failed to process email UID %d with OpenAI: %v. Sending original email.").String(), uid, err)
 			}
-			isSpam = res.IsSpam
-			if isSpam {
-				d.TextBody = res.Summary
-			}
+			d.Type = res.Type
+			d.Summary = res.Summary
+			d.Unsubscrube = res.Unsubscribe
 		}
 
-		if err := tb.SendEmailData(d, isCode, isSpam); err != nil {
+		if err := tb.SendEmailData(d); err != nil {
 			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Red("Error sending email %d to Telegram: %v").String(), uid, err)
 			continue
 		}

@@ -14,6 +14,9 @@ type ParsedEmailData struct {
 	To          string
 	Subject     string
 	TextBody    string
+	Summary     string
+	Unsubscrube string
+	Type        EmailType
 	Attachments map[string][]byte
 }
 
@@ -30,6 +33,7 @@ func ParseEmail(mail *imap.Email, uid int) *ParsedEmailData {
 		Subject:     mail.Subject,
 		TextBody:    mail.Text,
 		Attachments: make(map[string][]byte),
+		Type:        TypeUnknown,
 	}
 
 	if len(mail.Attachments) > 0 {

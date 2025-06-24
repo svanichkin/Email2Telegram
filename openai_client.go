@@ -26,26 +26,71 @@ func NewOpenAIClient(token string) (*OpenAIClient, error) {
 	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Cyan("Initializing OpenAI client...").String())
 	client := openai.NewClient(token)
 
-	systemPrompt := `Проанализируй следующее письмо и определи, является ли оно спамом. Верни результат в формате JSON:
+	systemPrompt :=
+		`
+Проанализируй письмо и верни результат в формате JSON. Не добавляй ничего от себя.
 
-- Если письмо спам с вероятностью 95%, верни:
-  {
-    "is_spam": true,
-    "summary": "Краткое описание содержания на языке письма"
-  }
+Если уверенность 95% или выше, выбери один из типов:
+- spam — спам
+- fishing — фишинг
+- notification — уведомление от банка/сервиса
+- code — код входа/подтверждения
+- human — личная переписка
+- unknown — если не подходит ни к одному типу
 
-- Если письмо содержит код подтверждения или входа, верни:
-  {
-    "is_spam": false,
-    "code": "Код из письма"
-  }
+Формат:
+{
+  "type": "spam|fishing|notification|code|human|unknown",
+  "summary": "Краткое описание письма на языке, на котором оно написано",
+  "unsubscribe": "URL отписки, если есть" // поле необязательное
+}
+Если type = "code", в summary укажи только сам код.
+`
+		/*
 
-- Если письмо не спам или спам с вероятностью менее 95% и не содержит код, верни:
-  {
-    "is_spam": false
-  }
+			`Проанализируй следующее письмо и определи, является ли оно спамом. Верни результат в формате JSON:
 
-Ты помощник, который кратко пересказывает email-сообщения на языке письма. Не добавляй ничего от себя.`
+			- Если письмо спам с вероятностью 95%, верни:
+			{
+				"type": "spam",
+				"summary": "Краткое описание содержания на языке письма",
+				"unsubscribe": "Если есть ссылка на отписку вставь сюда"
+			}
+
+			- Если письмо фишинг с вероятностью 95%, верни:
+			{
+				"type": "fishing",
+				"summary": "Краткое описание содержания на языке письма",
+				"unsubscribe": "Если есть ссылка на отписку вставь сюда"
+			}
+
+			- Если письмо полезное уведомление от банка или соц. сетей с вероятностью 95%, верни:
+			{
+				"type": "notification",
+				"summary": "Краткое описание содержания на языке письма",
+				"unsubscribe": "Если есть ссылка на отписку вставь сюда"
+			}
+
+			- Если письмо содержит код подтверждения или входа, верни:
+			{
+				"type": "code",
+				"summary": "Код из письма"
+			}
+
+			- Если письмо личная переписка с вероятностью 95%, верни:
+			{
+				"type": "human",
+				"summary": "Краткое описание содержания на языке письма"
+			}
+
+			- Если письмо не подходит ни к одному типу, верни:
+			{
+				"type": "unknown",
+				"summary": "Краткое описание содержания на языке письма",
+				"unsubscribe": "Если есть ссылка на отписку вставь сюда"
+			}
+
+		Ты помощник, который кратко пересказывает email-сообщения на языке письма. Не добавляй ничего от себя.`*/
 
 	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Green(au.Bold("OpenAI client initialized successfully")).String())
 	return &OpenAIClient{
@@ -54,10 +99,21 @@ func NewOpenAIClient(token string) (*OpenAIClient, error) {
 	}, nil
 }
 
+type EmailType string
+
+const (
+	TypeSpam         EmailType = "spam"
+	TypePhishing     EmailType = "fishing"
+	TypeNotification EmailType = "notification"
+	TypeCode         EmailType = "code"
+	TypeHuman        EmailType = "human"
+	TypeUnknown      EmailType = "unknown"
+)
+
 type EmailAnalysisResult struct {
-	IsSpam  bool   `json:"is_spam"`
-	Summary string `json:"summary,omitempty"`
-	Code    string `json:"code,omitempty"`
+	Type        EmailType `json:"type"`
+	Summary     string    `json:"summary"`
+	Unsubscribe string    `json:"unsubscribe,omitempty"`
 }
 
 func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysisResult, error) {
@@ -105,7 +161,7 @@ func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysis
 		return nil, fmt.Errorf("failed to parse OpenAI response as JSON: %w\nResponse: %s", err, content)
 	}
 
-	log.Printf(au.Gray(12, "[OPENAI]").String()+" "+au.Green("Analysis completed. IsSpam: %t, Code found: %t, Summary: %t").String(), result.IsSpam, result.Code != "", result.Summary != "")
+	log.Printf(au.Gray(12, "[OPENAI]").String()+" "+au.Green("Analysis completed. Type: %s, Unsubscribe: %t, Summary: %t").String(), string(result.Type), result.Summary != "", result.Unsubscribe != "")
 	return &result, nil
 }
 

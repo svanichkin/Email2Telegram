@@ -142,90 +142,44 @@ func (tb *TelegramBot) RequestUserInput(prompt string) (string, error) {
 
 }
 
-func (tb *TelegramBot) SendEmailData(data *ParsedEmailData, isCode, isSpam bool) error {
+func (tb *TelegramBot) SendEmailData(d *ParsedEmailData) error {
 
-	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Sending email data (UID: %d, IsCode: %t, IsSpam: %t)").String(), data.Uid, isCode, isSpam)
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Sending email data (UID: %d, type: %s)").String(), d.Uid, string(d.Type))
 	if tb.api == nil {
 		return errors.New("telego API is not initialized in SendEmailData")
 	}
 	if tb.ctx == nil {
 		tb.ctx = context.Background()
 	}
-	if data == nil {
+	if d == nil {
 		return errors.New("parsed email data is nil")
 	}
-	var tid string
 	var err error
-	if tb.isChat && !isSpam {
-		rid := fmt.Sprint(tb.recipientId)
-
-		// If topics is nil, try loading or create empty
-
-		if tb.topics == nil {
-			tb.topics, err = LoadAndDecrypt(rid, rid+".top")
-			if err != nil {
-				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to load topics: %v").String(), err)
-				tb.topics = make(map[string]string)
-			}
-		}
-
-		if tb.uids == nil {
-			tb.uids, err = LoadAndDecrypt(rid, rid+".uis")
-			if err != nil {
-				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to load uids: %v").String(), err)
-				tb.uids = make(map[string]string)
-			}
-		}
-
-		// Check topic id from topics, then create topic if needed
-
-		subj := cleanSubject(data.Subject)
-		tid = tb.topics[subj]
-		if tid == "" {
-			log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Blue("Creating new topic for: %s").String(), subj)
-			tid, err = tb.ensureTopic(subj)
-			if err != nil {
-				return fmt.Errorf("topic handling error (ensureTopic failed): %w", err)
-			}
-			tb.topics[subj] = tid
-			if err := EncryptAndSave(rid, rid+".top", tb.topics); err != nil {
-				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to save topics: %v").String(), err)
-			}
-			tb.uids[tid] = fmt.Sprint(data.Uid)
-			if err := EncryptAndSave(rid, rid+".uis", tb.uids); err != nil {
-				log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Yellow("Failed to save uids: %v").String(), err)
-			}
+	var tid string
+	if tb.isChat && d.Type != TypeSpam && d.Type != TypePhishing {
+		tid, err = tb.createTopicAndGetId(d)
+		if err != nil {
+			return err
 		}
 	}
-
-	// Send code message
-
-	if isCode {
-		if err := tb.sendCode(tid, data); err != nil {
+	switch d.Type {
+	case TypeCode:
+		if err := tb.sendCode(tid, d); err != nil {
 			return err
 		}
 		return nil
-	}
-
-	// Send spam message
-
-	if isSpam {
-		if err := tb.sendSpam(data); err != nil {
+	case TypeSpam, TypePhishing:
+		if err := tb.sendSpamOrPhishing(d); err != nil {
 			return err
 		}
 		return nil
-	}
-
-	// Send text message
-
-	if err := tb.sendText(tid, data); err != nil {
-		return err
-	}
-
-	// Send sttachments
-
-	if err := tb.sendAttachments(tid, data); err != nil {
-		return err
+	default:
+		if err := tb.sendHumanOrNotificationOrUnknown(tid, d); err != nil {
+			return err
+		}
+		if err := tb.sendAttachments(tid, d); err != nil {
+			return err
+		}
 	}
 
 	log.Println(au.Gray(12, "[TELEGRAM]").String() + " " + au.Green("Email data sent successfully").String())
