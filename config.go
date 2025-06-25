@@ -21,8 +21,7 @@ type Config struct {
 	EmailSmtpHost        string `ini:"smtp_host"`
 	EmailSmtpPort        int    `ini:"smtp_port"`
 	TelegramToken        string `ini:"token"`
-	TelegramUserId       int64  `ini:"user_id"`
-	TelegramChatId       int64  `ini:"chat_id"`
+	TelegramRecipientId  int64  `ini:"recipient_id"`
 	OpenAIToken          string `ini:"token"`
 	CheckIntervalSeconds int    `ini:"check_interval_seconds"`
 }
@@ -42,9 +41,8 @@ func LoadConfig(fp string) (*Config, error) {
 	// Parse telegram section from embed
 
 	cfg.TelegramToken = cf.Section("telegram").Key("token").String()
-	cfg.TelegramUserId, _ = cf.Section("telegram").Key("user_id").Int64()
-	cfg.TelegramChatId, _ = cf.Section("telegram").Key("chat_id").Int64()
-	if cfg.TelegramToken == "" || (cfg.TelegramUserId == 0 && cfg.TelegramChatId == 0) {
+	cfg.TelegramRecipientId, _ = cf.Section("telegram").Key("recipient_id").Int64()
+	if cfg.TelegramToken == "" || cfg.TelegramRecipientId == 0 {
 
 		// Create new conf from template
 
@@ -55,7 +53,7 @@ func LoadConfig(fp string) (*Config, error) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to write config to disk: %w", err)
 			}
-			return nil, fmt.Errorf("missing required configuration fields: TelegramToken and one of TelegramUserID or TelegramChatID")
+			return nil, fmt.Errorf("missing required configuration fields: [telegram] token and one of [telegram] recipient_id")
 		}
 
 		// Or load from disk
@@ -65,10 +63,9 @@ func LoadConfig(fp string) (*Config, error) {
 			return nil, fmt.Errorf("failed to load config file: %w", err)
 		}
 		cfg.TelegramToken = cf.Section("telegram").Key("token").String()
-		cfg.TelegramUserId, _ = cf.Section("telegram").Key("user_id").Int64()
-		cfg.TelegramChatId, _ = cf.Section("telegram").Key("chat_id").Int64()
-		if cfg.TelegramToken == "" || (cfg.TelegramUserId == 0 && cfg.TelegramChatId == 0) {
-			return nil, fmt.Errorf("missing required configuration fields: TelegramToken and one of TelegramUserID or TelegramChatID")
+		cfg.TelegramRecipientId, _ = cf.Section("telegram").Key("recipient_id").Int64()
+		if cfg.TelegramToken == "" || cfg.TelegramRecipientId == 0 {
+			return nil, fmt.Errorf("missing required configuration fields: [telegram] token and one of [telegram] recipient_id")
 		}
 	}
 
@@ -94,7 +91,7 @@ func LoadConfig(fp string) (*Config, error) {
 
 	emailUsername := cf.Section("email").Key("username").String()
 	if emailUsername == "" {
-		emailUsername = readUsername(cfg.TelegramUserId)
+		emailUsername = readUsername(cfg.TelegramRecipientId)
 	} else {
 		cfg.SetCred(emailUsername, "")
 	}
@@ -148,21 +145,21 @@ func parseCredString(cred string) (string, string) {
 
 }
 
-func readUsername(uid int64) string {
+func readUsername(rid int64) string {
 
-	creds, _ := keyring.Get("email2Telegram", fmt.Sprint(uid))
+	creds, _ := keyring.Get("email2Telegram", fmt.Sprint(rid))
 	email, _ := parseCredString(creds)
 
 	return email
 
 }
 
-func readCred(uid int64) (string, string) {
+func readCred(rid int64) (string, string) {
 
-	creds, err := keyring.Get("email2Telegram", fmt.Sprint(uid))
+	creds, err := keyring.Get("email2Telegram", fmt.Sprint(rid))
 	if err != nil {
 		log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Red("Failed to get credentials from keyring: %v").String(), err)
-		decrypted, err := LoadAndDecrypt(fmt.Sprint(uid), fmt.Sprint(uid)+".key")
+		decrypted, err := LoadAndDecrypt(fmt.Sprint(rid), fmt.Sprint(rid)+".key")
 		if err != nil {
 			log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Red("Failed to get credentials from file: %v").String(), err)
 		}
@@ -194,7 +191,7 @@ func (cfg *Config) updateHostIfNeeded(email string) {
 func (cfg *Config) GetCred() (string, string) {
 
 	log.Println(au.Gray(12, "[CONFIG]"), au.Cyan("Retrieving credentials..."))
-	email, password := readCred(cfg.TelegramUserId)
+	email, password := readCred(cfg.TelegramRecipientId)
 	cfg.updateHostIfNeeded(email)
 
 	return email, password
@@ -204,15 +201,15 @@ func (cfg *Config) GetCred() (string, string) {
 func (cfg *Config) SetCred(email string, password string) {
 
 	log.Println(au.Gray(12, "[CONFIG]"), au.Cyan("Storing credentials..."))
-	err := keyring.Set("email2Telegram", fmt.Sprint(cfg.TelegramUserId), createCredString(email, password))
+	err := keyring.Set("email2Telegram", fmt.Sprint(cfg.TelegramRecipientId), createCredString(email, password))
 	if err != nil {
 		log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Red("Failed to store credentials in keyring: %v").String(), err)
 		creds := map[string]string{"email": email, "password": password}
-		err := EncryptAndSave(fmt.Sprint(cfg.TelegramUserId), fmt.Sprint(cfg.TelegramUserId)+".key", creds)
+		err := EncryptAndSave(fmt.Sprint(cfg.TelegramRecipientId), fmt.Sprint(cfg.TelegramRecipientId)+".key", creds)
 		if err != nil {
 			log.Printf(au.Gray(12, "[CONFIG]").String()+" "+au.Red("Failed to store credentials in file: %v").String(), err)
 		} else {
-			log.Println(au.Gray(12, "[CONFIG]"), au.Green("Credentials stored securely in file: "+fmt.Sprint(cfg.TelegramUserId)+".key"))
+			log.Println(au.Gray(12, "[CONFIG]"), au.Green("Credentials stored securely in file: "+fmt.Sprint(cfg.TelegramRecipientId)+".key"))
 		}
 	} else {
 		log.Println(au.Gray(12, "[CONFIG]"), au.Green("Credentials stored securely in keyring"))

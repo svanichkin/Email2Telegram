@@ -256,19 +256,12 @@ func (tb *TelegramBot) CheckAndRequestAdminRights(chatID int64) (bool, error) {
 
 }
 
-func (tb *TelegramBot) CheckTopicsEnabled(chatID int64) (bool, error) {
+func (tb *TelegramBot) CheckTopicsEnabled(chat *telego.ChatFullInfo) (bool, error) {
 
-	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Checking topics for chat %d").String(), chatID)
+	log.Printf(au.Gray(12, "[TELEGRAM]").String()+" "+au.Cyan("Checking topics for chat %d").String(), tb.recipientId)
 	tb.isChat = false
 	if tb.api == nil {
 		return tb.isChat, errors.New("telego API not initialized in CheckTopicsEnabled")
-	}
-	if tb.ctx == nil {
-		tb.ctx = context.Background()
-	}
-	chat, errChat := tb.api.GetChat(tb.ctx, &telego.GetChatParams{ChatID: tu.ID(chatID)})
-	if errChat != nil {
-		return tb.isChat, fmt.Errorf("failed to get chat details for %d: %w", chatID, errChat)
 	}
 	if chat.IsForum {
 		tb.isChat = true

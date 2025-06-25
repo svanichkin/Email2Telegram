@@ -73,8 +73,7 @@ After the initial setup, or if you prefer to configure manually, a configuration
 ```ini
 [telegram]
 token = YOUR_TELEGRAM_BOT_TOKEN
-user_id = YOUR_TELEGRAM_USER_ID # Required if not using group mode (chat_id)
-# chat_id = YOUR_GROUP_CHAT_ID    # Required for group mode, uncomment and fill
+recipient_id = YOUR_TELEGRAM_USER_ID_OR_CHAT_ID_AS_INTEGER
 
 [email]
 imap_host = imap.example.com
@@ -91,8 +90,7 @@ smtp_port = 587
 
 *   **`[telegram]`**
     *   `token`: Your Telegram bot's API token (Required).
-    *   `user_id`: Your numeric Telegram user ID. Required if `chat_id` is not set. The bot will only interact with this user in direct chat mode.
-    *   `chat_id`: (Optional) Your numeric Telegram group chat ID. If set, the bot operates in this group. This setting takes precedence over `user_id` for determining where the bot is active. The bot needs admin rights in the group to manage topics.
+    *   `recipient_id`: Your numeric Telegram user ID or group chat ID. The bot needs admin rights in the group to manage topics.
 *   **`[email]`**
     *   `imap_host`: (Optional) Your IMAP server hostname (e.g., `imap.gmail.com`). If left blank, the application will try to derive it from your email domain.
     *   `imap_port`: (Optional) Your IMAP server port. Defaults to `993` (for IMAP over SSL/TLS).

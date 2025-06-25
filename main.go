@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/mail"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/BrianLeishman/go-imap"
 	"github.com/logrusorgru/aurora/v4"
+	"github.com/mymmrac/telego"
 )
 
 var au aurora.Aurora
@@ -34,56 +36,44 @@ func main() {
 		log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red(aurora.Bold("Failed to load config: %v")).String(), err)
 	}
 
-	// Chat id or user id
-
-	var rid int64
-	if cfg.TelegramChatId != 0 {
-		rid = cfg.TelegramChatId
-		log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Blue("Operating in group chat mode. Chat ID: %d").String(), rid)
-		if cfg.TelegramUserId != 0 {
-			log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Yellow("Note: Telegram UserID (%d) is also set in config, but ChatID (%d) takes precedence for bot operations.").String(), cfg.TelegramUserId, cfg.TelegramChatId)
-		}
-	} else if cfg.TelegramUserId != 0 {
-		rid = cfg.TelegramUserId
-		log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Blue("Operating in direct user message mode. User ID: %d").String(), rid)
-	} else {
-		log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red(aurora.Bold("Critical configuration error: Neither Telegram UserID nor ChatID is set after config load. Token presence: %t")).String(), cfg.TelegramToken != "")
-	}
-
 	// Telegram init
 
-	tb, err := NewTelegramBot(cfg.TelegramToken, rid)
+	tb, err := NewTelegramBot(cfg.TelegramToken, cfg.TelegramRecipientId)
 	if err != nil {
 		log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red(aurora.Bold("Failed to init Telegram bot: %v")).String(), err)
 	}
 
 	// Check permissions if group mode
 
-	if cfg.TelegramChatId != 0 {
-		log.Printf(au.Gray(12, "[INIT]").String()+" "+au.Magenta("Checking admin rights for bot in group chat ID: %d").String(), cfg.TelegramChatId)
+	chat, err := tb.api.GetChat(context.Background(), &telego.GetChatParams{ChatID: telego.ChatID{ID: cfg.TelegramRecipientId}})
+	if err != nil {
+		log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red(aurora.Bold("Failed to get chat info Telegram bot: %v")).String(), err)
+	}
+
+	if chat.Type == "supergroup" {
+
+		// Check topics enabled
+
+		ok, err := tb.CheckTopicsEnabled(chat)
+		if err != nil {
+			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Error checking topics for chat ID %d: %v").String(), cfg.TelegramRecipientId, err)
+		} else if !ok {
+			if err := tb.SendMessage("Topics are not enabled in this group. Please enable them for proper functionality."); err != nil {
+				log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Error sending 'topics not enabled' notification to chat ID %d: %v").String(), cfg.TelegramRecipientId, err)
+			}
+			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed topics enabled for chat: %d").String(), cfg.TelegramRecipientId)
+		}
 
 		// Check admin rights
 
-		ok, err := tb.CheckAndRequestAdminRights(cfg.TelegramChatId)
+		ok, err = tb.CheckAndRequestAdminRights(cfg.TelegramRecipientId)
 		if err != nil {
 			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Error during CheckAndRequestAdminRights API call: %v").String(), err)
 		} else if !ok {
 			if err := tb.SendMessage("For correct operation, I need administrator rights in this group chat. Please provide them."); err != nil {
-				log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed to send admin rights request message to chat %d: %v").String(), cfg.TelegramChatId, err)
+				log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed to send admin rights request message to chat %d: %v").String(), cfg.TelegramRecipientId, err)
 			}
-			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed admin rights for chat: %d").String(), cfg.TelegramChatId)
-		}
-
-		// Check topics enabled
-
-		ok, err = tb.CheckTopicsEnabled(cfg.TelegramChatId)
-		if err != nil {
-			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Error checking topics for chat ID %d: %v").String(), cfg.TelegramChatId, err)
-		} else if !ok {
-			if err := tb.SendMessage("Topics are not enabled in this group. Please enable them for proper functionality."); err != nil {
-				log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Error sending 'topics not enabled' notification to chat ID %d: %v").String(), cfg.TelegramChatId, err)
-			}
-			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed topics enabled for chat: %d").String(), cfg.TelegramChatId)
+			log.Fatalf(au.Gray(12, "[INIT]").String()+" "+au.Red("Failed admin rights for chat: %d").String(), cfg.TelegramRecipientId)
 		}
 	}
 
