@@ -32,7 +32,7 @@ func NewOpenAIClient(token string) (*OpenAIClient, error) {
 
 Если уверенность 95% или выше, выбери один из типов:
 - spam — спам
-- fishing — фишинг
+- phishing — фишинг
 - notification — уведомление от банка/сервиса
 - code — код входа/подтверждения
 - human — личная переписка
@@ -40,7 +40,7 @@ func NewOpenAIClient(token string) (*OpenAIClient, error) {
 
 Формат:
 {
-  "type": "spam|fishing|notification|code|human|unknown",
+  "type": "spam|phishing|notification|code|human|unknown",
   "language": "Определи язык на котором письмо написано",
   "summary": "Краткое описание письма на языке language",
   "unsubscribe": "URL отписки, если есть" // поле необязательное
@@ -58,7 +58,7 @@ type EmailType string
 
 const (
 	TypeSpam         EmailType = "spam"
-	TypePhishing     EmailType = "fishing"
+	TypePhishing     EmailType = "phishing"
 	TypeNotification EmailType = "notification"
 	TypeCode         EmailType = "code"
 	TypeHuman        EmailType = "human"
