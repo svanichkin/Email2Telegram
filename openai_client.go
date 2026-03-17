@@ -23,8 +23,10 @@ func NewOpenAIClient(token string) (*OpenAIClient, error) {
 		log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Yellow("No OpenAI token provided, client will be disabled").String())
 		return nil, nil
 	}
-	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Cyan("Initializing OpenAI client...").String())
-	client := openai.NewClient(token)
+	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Cyan("Initializing OpenRouter client...").String())
+	config := openai.DefaultConfig(token)
+	config.BaseURL = "https://openrouter.ai/api/v1"
+	client := openai.NewClientWithConfig(config)
 
 	systemPrompt :=
 		`
@@ -47,7 +49,7 @@ func NewOpenAIClient(token string) (*OpenAIClient, error) {
 }
 Если type = "code", в summary укажи только сам код.
 `
-	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Green(au.Bold("OpenAI client initialized successfully")).String())
+	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Green(au.Bold("OpenRouter client initialized successfully")).String())
 	return &OpenAIClient{
 		client:       client,
 		systemPrompt: systemPrompt,
@@ -80,13 +82,11 @@ func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysis
 		return nil, errors.New("email text is empty")
 	}
 
-	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Magenta("Analyzing email content with OpenAI...").String())
+	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Magenta("Analyzing email content with OpenRouter...").String())
 	resp, err := oac.client.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
-			//Model: "gpt-4o-mini",
-			//Model: "gpt-4.1",
-			Model: "gpt-4o",
+			Model: "google/gemini-3.1-flash-lite-preview",
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleSystem,
@@ -101,19 +101,19 @@ func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysis
 		},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("OpenAI chat completion error: %w", err)
+		return nil, fmt.Errorf("OpenRouter chat completion error: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {
-		return nil, errors.New("OpenAI returned no choices")
+		return nil, errors.New("OpenRouter returned no choices")
 	}
 
-	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Blue("Received response from OpenAI, processing...").String())
+	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Blue("Received response from OpenRouter, processing...").String())
 	content := cleanOpenAIResponse(resp.Choices[0].Message.Content)
 
 	var result EmailAnalysisResult
 	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse OpenAI response as JSON: %w\nResponse: %s", err, content)
+		return nil, fmt.Errorf("failed to parse OpenRouter response as JSON: %w\nResponse: %s", err, content)
 	}
 
 	log.Printf(au.Gray(12, "[OPENAI]").String()+" "+au.Green("Analysis completed. Type: %s, Unsubscribe: %t, Summary: %t").String(), string(result.Type), result.Summary != "", result.Unsubscribe != "")
@@ -122,7 +122,7 @@ func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysis
 
 func cleanOpenAIResponse(resp string) string {
 
-	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Cyan("Cleaning OpenAI response...").String())
+	log.Println(au.Gray(12, "[OPENAI]").String() + " " + au.Cyan("Cleaning OpenRouter response...").String())
 	re := regexp.MustCompile("(?s)^```json\\s*(.*)\\s*```$|^```\\s*(.*)\\s*```$")
 	matches := re.FindStringSubmatch(resp)
 	if len(matches) > 0 {
