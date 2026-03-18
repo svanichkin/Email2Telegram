@@ -86,7 +86,7 @@ func (oac *OpenAIClient) GenerateTextFromEmail(emailText string) (*EmailAnalysis
 	resp, err := oac.client.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
-			Model: "google/gemini-3.1-flash-lite-preview",
+			Model: "qwen/qwen3-coder",
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleSystem,
